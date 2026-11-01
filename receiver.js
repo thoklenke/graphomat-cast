@@ -196,7 +196,10 @@ function handle(message, reply) {
       Object.assign(config, message);
       if (!config.plotter) plotterProgress = 0;
       if (!config.captions) captionEl.style.opacity = 0;
-      if (changed) rebuild();
+      if (changed) {
+        rebuild();
+        if (song) showCaption(song);
+      }
       break;
     }
     case 'song':
