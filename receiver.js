@@ -192,12 +192,8 @@ function handle(message, reply) {
     case 'song':
       showCaption({ id: `${message.title}|${message.artist}`.toLowerCase(), title: message.title, artist: message.artist });
       break;
-    case 'clearSong':
-      song = null;
-      captionEl.style.opacity = 0;
-      break;
     case 'ping':
-      reply({ t: 'pong', id: message.id, lines: lines.count, detail: lines.detail, frameMs: frameAverage });
+      reply({ t: 'pong', id: message.id, lines: lines.count, detail: lines.detail, frameMs: frameAverage, awake: awakeStatus() });
       break;
   }
 }
@@ -212,6 +208,62 @@ function demoFeatures(time) {
     onset: kick, onsetCount: Math.floor(beat), tempoBPM: 120, tempoConfidence: 1, state: 'music',
   };
 }
+
+// Google TV's screensaver starts after inactivity unless media is playing or the page holds the
+// screen awake. No Cast document says which works for a receiver, so this does both and reports them.
+let wakeLock = null;
+let wakeLockError = 'not requested';
+let keepAwakeVideo = null;
+let keepAwakeError = '';
+
+async function requestWakeLock() {
+  if (!navigator.wakeLock) { wakeLockError = 'unsupported'; return; }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLockError = '';
+    wakeLock.addEventListener('release', () => { wakeLock = null; wakeLockError = 'released'; });
+  } catch (error) {
+    wakeLockError = error.name;
+  }
+}
+
+function startKeepAwakeVideo() {
+  const source = document.createElement('canvas');
+  source.width = source.height = 2;
+  const context2d = source.getContext('2d');
+  let tick = 0;
+  // A captured stream only produces frames while its canvas changes.
+  setInterval(() => {
+    context2d.fillStyle = tick++ % 2 ? '#000' : '#010101';
+    context2d.fillRect(0, 0, 2, 2);
+  }, 1000);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = source.captureStream(1);
+  video.style.cssText = 'position:fixed;right:0;bottom:0;width:2px;height:2px;opacity:0.01';
+  document.body.appendChild(video);
+  video.play().catch(error => { keepAwakeError = error.name; });
+  keepAwakeVideo = video;
+}
+
+function awakeStatus() {
+  const lock = wakeLock && !wakeLock.released ? 'lock on' : `lock off (${wakeLockError})`;
+  const video = keepAwakeVideo && !keepAwakeVideo.paused ? 'video playing' : `video off (${keepAwakeError || 'paused'})`;
+  return `${lock}, ${video}`;
+}
+window.awakeStatus = awakeStatus;
+
+// A wake lock is dropped whenever the page is hidden, so take it again on return.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !wakeLock) requestWakeLock();
+});
+requestWakeLock();
+startKeepAwakeVideo();
+setInterval(() => {
+  if (!wakeLock) requestWakeLock();
+  if (keepAwakeVideo && keepAwakeVideo.paused) keepAwakeVideo.play().catch(error => { keepAwakeError = error.name; });
+}, 30000);
 
 window.addEventListener('resize', rebuild);
 
