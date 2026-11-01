@@ -70,7 +70,6 @@ class LineBuffer {
 
 class Schotter {
   constructor(seed, width, height) {
-    this.style = 'ink';
     this.random = new SeededRandom(seed);
     const landscape = width >= height;
     this.columns = landscape ? 22 : 12;
@@ -122,7 +121,6 @@ class Schotter {
 
 class Hommage {
   constructor(seed, width, height) {
-    this.style = 'ink';
     this.width = width; this.height = height;
     this.margin = Math.min(width, height) * 0.035;
     this.bandCount = 9;
@@ -298,7 +296,6 @@ class Hommage {
 
 class Korridor {
   constructor(seed, width, height) {
-    this.style = 'ink';
     this.seed = seed;
     this.chunkLength = 2; this.chunkCount = 11; this.beatSpacing = 0.5;
     this.wallRows = 17; this.wallColumns = 14; this.near = 0.18;
@@ -441,80 +438,168 @@ class Korridor {
   }
 }
 
-class Oscillon {
+// After Paul Brown, Untitled, Computer Assisted Drawing, 1975. Tile shapes are worked out from the print.
+class Kacheln {
   constructor(seed, width, height) {
-    this.style = 'phosphor';
     this.random = new SeededRandom(seed);
-    this.cx = width / 2; this.cy = height / 2;
-    this.radius = Math.min(width, height) * 0.40;
-    // 200 traces rather than the iPad's 260: the TV test held 60 fps up to 20,000 lines and 53 at 44,000.
-    this.traces = 200; this.sides = 170;
-    this.figures = [[1, -3, 9], [1, -2, 7], [1, -4, 11], [2, -3, 13]];
-    this.figure = this.figures[0];
-    this.nextFigure = null;
-    this.fade = 1; this.time = 0; this.rotation = 0.6; this.sweep = 0;
-    this.bass = 0; this.mid = 0; this.high = 0; this.flash = 0; this.exposure = 0.35;
-    this.lastOnset = 0; this.quietTime = 0; this.hasChanged = false; this.songID = null;
+    const margin = Math.min(width, height) * 0.035;
+    this.size = (Math.min(width, height) - margin * 2) / 16;
+    this.columns = Math.floor((width - margin * 2) / this.size);
+    this.rows = Math.floor((height - margin * 2) / this.size);
+    this.originX = (width - this.columns * this.size) / 2;
+    this.originY = (height - this.rows * this.size) / 2;
+    this.spread = 0.16; this.lastOnset = 0; this.sinceDrift = 0;
+    this.tiles = [];
+    for (let i = 0; i < this.columns * this.rows; i++) {
+      const form = this.rollForm();
+      this.tiles.push({ form, turn: this.random.int(0, 3), previousForm: form, progress: 1 });
+    }
   }
-  update(dt, audio, song) {
-    this.time += dt;
-    const approach = (value, target, up, down) => value + (target - value) * (1 - Math.exp(-dt / (target > value ? up : down)));
-    this.bass = approach(this.bass, audio.bass, 0.05, 0.45);
-    this.mid = approach(this.mid, audio.mid, 0.15, 0.6);
-    this.high = approach(this.high, audio.high, 0.04, 0.2);
-    this.flash *= Math.exp(-dt / 0.18);
-    const isMusic = audio.state === 'music';
-    this.exposure = approach(this.exposure, isMusic ? 0.55 + audio.energy * 0.6 : 0.3, 0.3, 1.5);
-    const tempo = audio.tempoConfidence > 0.3 ? audio.tempoBPM / 120 : 1;
-    this.rotation += dt * (isMusic ? 0.05 + 0.05 * tempo : 0.012);
-    this.sweep += dt * (isMusic ? 0.22 + this.mid * 0.5 : 0.04);
+  rollForm() {
+    const roll = this.random.unit();
+    return roll < 0.76 ? 0 : roll < 0.88 ? 1 : 2;
+  }
+  change(index) {
+    const tile = this.tiles[index];
+    if (tile.progress < 1) return;
+    tile.previousForm = tile.form;
+    tile.form = this.rollForm();
+    tile.turn += 1;
+    tile.progress = 0;
+  }
+  // Turns a small neighborhood, because the patterns live in how neighbors connect.
+  changeCluster(count) {
+    const r = this.random, cx = r.int(0, this.columns - 1), cy = r.int(0, this.rows - 1);
+    for (let i = 0; i < count; i++) {
+      const x = cx + r.int(-2, 2), y = cy + r.int(-2, 2);
+      if (x >= 0 && x < this.columns && y >= 0 && y < this.rows) this.change(y * this.columns + x);
+    }
+  }
+  update(dt, audio) {
+    const target = 0.16 + audio.bass * 0.035;
+    this.spread += (target - this.spread) * (1 - Math.exp(-dt / (target > this.spread ? 0.05 : 0.35)));
     if (audio.onsetCount !== this.lastOnset) {
       this.lastOnset = audio.onsetCount;
-      this.flash = Math.max(this.flash, audio.onset);
-      this.sweep += audio.onset * 0.09;
+      this.changeCluster(2 + Math.floor(audio.onset * 10));
     }
-    this.quietTime = isMusic ? 0 : this.quietTime + dt;
-    if (isMusic) this.hasChanged = false;
-    let change = false;
-    if (this.quietTime > 8 && !this.hasChanged) { this.hasChanged = true; change = true; }
-    if (song && song.id !== this.songID) { change = this.songID !== null; this.songID = song.id; }
-    if (change) this.nextFigure = this.figures[this.random.int(0, this.figures.length - 1)];
-    if (this.nextFigure) {
-      this.fade -= dt / 1.6;
-      if (this.fade <= 0) { this.fade = 0; this.figure = this.nextFigure; this.nextFigure = null; }
+    this.sinceDrift += dt;
+    if (this.sinceDrift > (audio.state === 'music' ? 1.5 : audio.state === 'quiet' ? 2.5 : 6)) {
+      this.sinceDrift = 0;
+      this.change(this.random.int(0, this.tiles.length - 1));
+    }
+    const step = dt / 0.45;
+    for (const tile of this.tiles) if (tile.progress < 1) tile.progress = Math.min(1, tile.progress + step);
+  }
+  emit(lines) {
+    const x0 = this.originX, y0 = this.originY, x1 = x0 + this.columns * this.size, y1 = y0 + this.rows * this.size;
+    lines.line(x0, y0, x1, y0); lines.line(x1, y0, x1, y1); lines.line(x1, y1, x0, y1); lines.line(x0, y1, x0, y0);
+    const sides = Math.max(5, Math.floor(9 * lines.detail));
+    this.tiles.forEach((tile, index) => {
+      const cx = x0 + (index % this.columns + 0.5) * this.size;
+      const cy = y0 + (Math.floor(index / this.columns) + 0.5) * this.size;
+      const p = tile.progress, eased = p * p * (3 - 2 * p);
+      const angle = (tile.turn - (1 - eased)) * Math.PI / 2;
+      if (p >= 1 || tile.form === tile.previousForm) {
+        this.draw(lines, tile.form, cx, cy, angle, 1, sides);
+      } else {
+        this.draw(lines, tile.previousForm, cx, cy, angle, 1 - eased, sides);
+        this.draw(lines, tile.form, cx, cy, angle, eased, sides);
+      }
+    });
+  }
+  draw(lines, form, cx, cy, angle, alpha, sides) {
+    const half = this.size / 2, gap = this.size * this.spread;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const arc = (x, y, radius, from, count) => {
+      let px = 0, py = 0;
+      for (let i = 0; i <= count; i++) {
+        const a = from + i / count * Math.PI / 2;
+        const lx = x + radius * Math.cos(a), ly = y + radius * Math.sin(a);
+        const qx = cx + lx * cos - ly * sin, qy = cy + lx * sin + ly * cos;
+        if (i > 0) lines.line(px, py, qx, qy, alpha);
+        px = qx; py = qy;
+      }
+    };
+    // Closes a band arriving at an edge, rounding it off with a ring and a small dot.
+    const cap = (x, y, from) => {
+      for (const radius of [gap, gap * 0.3]) {
+        arc(x, y, radius, from, 3);
+        arc(x, y, radius, from + Math.PI / 2, 3);
+      }
+    };
+    if (form === 0) {
+      for (const radius of [half - gap, half, half + gap]) {
+        arc(-half, -half, radius, 0, sides);
+        arc(half, half, radius, Math.PI, sides);
+      }
+    } else if (form === 1) {
+      for (const x of [-gap, 0, gap]) {
+        lines.line(cx + x * cos + half * sin, cy + x * sin - half * cos, cx + x * cos - half * sin, cy + x * sin + half * cos, alpha);
+      }
+      cap(-half, 0, -Math.PI / 2);
+      cap(half, 0, Math.PI / 2);
     } else {
-      this.fade = Math.min(1, this.fade + dt / 2.4);
+      cap(-half, 0, -Math.PI / 2);
+      cap(half, 0, Math.PI / 2);
+      cap(0, -half, 0);
+      cap(0, half, Math.PI);
+    }
+  }
+}
+
+// After A. Michael Noll, Ninety Parallel Sinusoids with Linearly Increasing Period, 1964.
+class Sinus {
+  constructor(seed, width, height) {
+    const margin = Math.min(width, height) * 0.05;
+    this.left = margin;
+    this.width = width - margin * 2;
+    this.top = margin;
+    this.rowCount = 90;
+    this.spacing = (height - margin * 2) / (this.rowCount - 1);
+    this.shortest = this.width / (2 * Math.PI * 34);
+    this.longest = this.width / (2 * Math.PI * 6);
+    this.offset = (seed % 1000) / 1000 * this.width;
+    this.speed = 0;
+    this.bands = new Array(16).fill(0);
+    this.pulsePosition = 2; this.pulseStrength = 0; this.lastOnset = 0;
+  }
+  update(dt, audio) {
+    const beat = audio.tempoConfidence > 0.3 ? audio.tempoBPM / 60 : 1 + audio.energy;
+    const target = audio.state === 'music' ? this.width * 0.012 * beat * (0.5 + audio.energy)
+      : this.width * (audio.state === 'quiet' ? 0.002 : 0.0008);
+    this.speed += (target - this.speed) * (1 - Math.exp(-dt / 0.8));
+    this.offset += this.speed * dt;
+    const follow = 1 - Math.exp(-dt / 0.1);
+    for (let i = 0; i < 16; i++) this.bands[i] += (audio.bands[i] - this.bands[i]) * follow;
+    this.pulsePosition += dt / 0.9;
+    this.pulseStrength *= Math.exp(-dt / 0.7);
+    if (audio.onsetCount !== this.lastOnset) {
+      this.lastOnset = audio.onsetCount;
+      if (audio.onset > 0.5) { this.pulsePosition = 0; this.pulseStrength = audio.onset; }
     }
   }
   emit(lines) {
-    const traces = Math.floor(this.traces * lines.detail), sides = this.sides;
-    const [mainRatio, counterRatio, rippleRatio] = this.figure;
-    const width = 0.35 + this.mid * 0.9;
-    // Higher than the iPad's 0.05, because WebGL here blends in gamma space rather than linear light.
-    const brightness = this.fade * this.exposure * (1 + this.flash * 0.9) * (260 / traces) * 0.14;
-    const cosR = Math.cos(this.rotation), sinR = Math.sin(this.rotation);
-    for (let trace = 0; trace < traces; trace++) {
-      const t = trace / (traces - 1);
-      const eased = t * t * (3 - 2 * t);
-      const main = (0.94 - 0.60 * eased) * (0.93 + this.bass * 0.12);
-      const counter = main * (0.04 + 0.30 * eased + this.bass * 0.05);
-      const phase = this.sweep + (t - 0.5) * width;
-      const ripple = (0.012 + this.high * 0.018) * Math.sin(Math.PI * t);
-      const rim = 1 + 1.6 * Math.max(0, 1 - t * 9);
-      const alpha = brightness * Math.min(1, (1 - t) * 14) * rim * (0.62 + 0.38 * eased);
+    for (let row = 0; row < this.rowCount; row++) {
+      const t = row / (this.rowCount - 1);
+      const period = this.shortest + (this.longest - this.shortest) * t;
+      // Enough points per wave to look curved, so tight rows get more than long ones.
+      const samples = Math.max(48, Math.floor(this.width / (2 * Math.PI * period) * 14 * lines.detail));
+      const baseY = this.top + row * this.spacing;
+      const position = (1 - t) * 15, lower = Math.floor(position), upper = Math.min(lower + 1, 15);
+      const level = this.bands[lower] + (this.bands[upper] - this.bands[lower]) * (position - lower);
+      const distance = t - this.pulsePosition;
+      const pulse = this.pulseStrength * Math.exp(-distance * distance * 90);
+      const amplitude = this.spacing * (1.4 + level * 3.2 + pulse * 2.5);
+      const phase = (this.offset / period) % (2 * Math.PI);
       let px = 0, py = 0;
-      for (let side = 0; side <= sides; side++) {
-        const s = side / sides * 2 * Math.PI;
-        const a = mainRatio * s, b = counterRatio * s + phase, c = rippleRatio * s + this.time * 0.7 + t * 3;
-        const x = main * Math.cos(a) + counter * Math.cos(b) + ripple * Math.cos(c);
-        const y = 0.92 * main * Math.sin(a + 0.22) + counter * Math.sin(b) + ripple * Math.sin(c);
-        const qx = this.cx + (x * cosR - y * sinR) * this.radius;
-        const qy = this.cy + (x * sinR + y * cosR) * this.radius;
-        if (side > 0) lines.line(px, py, qx, qy, alpha);
+      for (let sample = 0; sample <= samples; sample++) {
+        const x = sample / samples * this.width;
+        const qx = this.left + x, qy = baseY + amplitude * Math.sin(x / period + phase);
+        if (sample > 0) lines.line(px, py, qx, qy);
         px = qx; py = qy;
       }
     }
   }
 }
 
-const PRESETS = { hommage: Hommage, korridor: Korridor, oscillon: Oscillon, schotter: Schotter };
+const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, sinus: Sinus, schotter: Schotter };
