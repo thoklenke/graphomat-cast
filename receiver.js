@@ -9,7 +9,6 @@ const isDemo = params.has('demo');
 const PALETTES = {
   paper: { background: [0.875, 0.860, 0.830], line: [0.13, 0.13, 0.13] },
   dark: { background: [0.055, 0.055, 0.06], line: [0.88, 0.87, 0.84] },
-  phosphor: { background: [0.10, 0.115, 0.11], line: [0.96, 0.97, 0.88] },
 };
 const SILENCE = { bands: new Array(16).fill(0), bass: 0, mid: 0, high: 0, energy: 0, onset: 0, onsetCount: 0, tempoBPM: 0, tempoConfidence: 0, state: 'idle' };
 
@@ -62,20 +61,13 @@ gl.attachShader(program, compile(gl.VERTEX_SHADER, `
 gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `
   precision highp float;
   uniform float halfWidth;
-  uniform float penTip;
   uniform vec3 color;
   varying vec2 local;
   varying float len;
   varying float light;
   void main() {
-    float c;
-    if (penTip > 0.5) {
-      float h = clamp(local.x, 0.0, len);
-      c = clamp(halfWidth + 0.5 - length(local - vec2(h, 0.0)), 0.0, 1.0);
-    } else {
-      c = exp(-2.5 * local.y * local.y / (halfWidth * halfWidth));
-    }
-    c *= light;
+    float h = clamp(local.x, 0.0, len);
+    float c = clamp(halfWidth + 0.5 - length(local - vec2(h, 0.0)), 0.0, 1.0) * light;
     gl_FragColor = vec4(color * c, c);
   }`));
 gl.linkProgram(program);
@@ -101,6 +93,7 @@ for (const [name, size, offset] of [['a', 2, 0], ['b', 2, 8], ['alpha', 1, 16]])
   gl.vertexAttribDivisor(location, 1);
 }
 gl.enable(gl.BLEND);
+gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
 let preset = null;
 let width = 0, height = 0;
@@ -140,23 +133,18 @@ function draw(now) {
     lines.truncate(plotterProgress);
   }
 
-  const isInk = preset.style === 'ink';
-  const palette = isInk ? (PALETTES[config.appearance] || PALETTES.paper) : PALETTES.phosphor;
-  const minimumSide = Math.min(width, height);
-  const halfWidth = Math.max(0.6, minimumSide / (isInk ? 1050 : 700));
+  const palette = PALETTES[config.appearance] || PALETTES.paper;
+  const halfWidth = Math.max(0.6, Math.min(width, height) / 1050);
   gl.uniform1f(uniform('halfWidth'), halfWidth);
   gl.uniform1f(uniform('reach'), halfWidth + 1);
-  gl.uniform1f(uniform('cap'), isInk ? halfWidth + 1 : 0);
-  gl.uniform1f(uniform('penTip'), isInk ? 1 : 0);
+  gl.uniform1f(uniform('cap'), halfWidth + 1);
   gl.uniform3fv(uniform('color'), palette.line);
-  if (isInk) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-  else gl.blendFunc(gl.ONE, gl.ONE);
   gl.clearColor(palette.background[0], palette.background[1], palette.background[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, lines.data.subarray(0, lines.count * 5));
   gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, lines.count);
 
-  styleCaption(palette, !isInk || config.appearance === 'dark');
+  styleCaption(palette, config.appearance === 'dark');
   window.lastLineCount = lines.count;
   requestAnimationFrame(draw);
 }
