@@ -156,9 +156,19 @@ function draw(now) {
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, lines.data.subarray(0, lines.count * 5));
   gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, lines.count);
 
-  captionEl.style.color = !isInk || config.appearance === 'dark' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)';
+  styleCaption(palette, !isInk || config.appearance === 'dark');
   window.lastLineCount = lines.count;
   requestAnimationFrame(draw);
+}
+
+// The plate uses the visual's own background color, so the caption reads like a label on a print.
+let captionPalette = null;
+function styleCaption(palette, isDark) {
+  if (palette === captionPalette) return;
+  captionPalette = palette;
+  const [r, g, b] = palette.background.map(value => Math.round(value * 255));
+  captionEl.style.background = `rgba(${r},${g},${b},0.92)`;
+  captionEl.style.color = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
 }
 
 function showCaption(next) {
