@@ -14,6 +14,7 @@ const SILENCE = { bands: new Array(16).fill(0), bass: 0, mid: 0, high: 0, energy
 
 const canvas = document.getElementById('stage');
 const captionEl = document.getElementById('caption');
+const lyricEl = document.getElementById('lyric');
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
 
 const config = {
@@ -157,6 +158,8 @@ function styleCaption(palette, isDark) {
   const [r, g, b] = palette.background.map(value => Math.round(value * 255));
   captionEl.style.background = `rgba(${r},${g},${b},0.92)`;
   captionEl.style.color = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
+  lyricEl.style.background = captionEl.style.background;
+  lyricEl.style.color = captionEl.style.color;
 }
 
 function showCaption(next) {
@@ -170,8 +173,21 @@ function showCaption(next) {
   captionTimer = setTimeout(() => { captionEl.style.opacity = 0; }, 12000);
 }
 
+function showLyric(line, next) {
+  lyricEl.textContent = line;
+  if (next) {
+    const nextEl = document.createElement('small');
+    nextEl.textContent = next;
+    lyricEl.appendChild(nextEl);
+  }
+  lyricEl.style.opacity = line || next ? 1 : 0;
+}
+
 function handle(message, reply) {
   switch (message.t) {
+    case 'lyric':
+      showLyric(message.line, message.next);
+      break;
     case 'f':
       audio = {
         bands: message.b, bass: message.ba, mid: message.m, high: message.h, energy: message.e,
