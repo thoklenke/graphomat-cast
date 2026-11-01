@@ -30,7 +30,11 @@ function report(done) {
   const lines = [info(), ...results.map(r =>
     `${String(r.lines).padStart(6)} lines  ${r.fps.toFixed(1).padStart(5)} fps  worst frame ${r.worstMs.toFixed(0)} ms`)];
   reportEl.textContent = lines.join('\n') + (done ? '\nDone.' : '');
-  if (cast_) cast_.sendCustomMessage(NAMESPACE, undefined, { info: info(), results, done });
+  try {
+    if (cast_) cast_.sendCustomMessage(NAMESPACE, undefined, { info: info(), results, done });
+  } catch (error) {
+    // No sender is listening. The results are still on screen.
+  }
 }
 
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' })
@@ -45,13 +49,18 @@ function info() {
   return `${isGL2 ? 'WebGL2' : instancing ? 'WebGL1+instancing' : 'WebGL1, no instancing'} | ${gpu} | ${canvas.width}x${canvas.height}`;
 }
 
+// Outside a Cast session, such as in a TV's browser app, the test still runs and shows results on screen.
 if (window.cast && cast.framework && location.hostname !== 'localhost') {
-  const context = cast.framework.CastReceiverContext.getInstance();
-  const options = new cast.framework.CastReceiverOptions();
-  options.disableIdleTimeout = true;
-  options.customNamespaces = { [NAMESPACE]: cast.framework.system.MessageType.JSON };
-  context.start(options);
-  cast_ = context;
+  try {
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const options = new cast.framework.CastReceiverOptions();
+    options.disableIdleTimeout = true;
+    options.customNamespaces = { [NAMESPACE]: cast.framework.system.MessageType.JSON };
+    context.start(options);
+    cast_ = context;
+  } catch (error) {
+    cast_ = null;
+  }
 }
 
 function compile(type, source) {
@@ -193,6 +202,7 @@ function run() {
 }
 
 window.addEventListener('error', event => {
+  if (event.filename && event.filename.includes('gstatic.com')) return; // The Cast SDK, outside a Cast device.
   reportEl.textContent = `${info()}\nError: ${event.message}`;
 });
 if (gl && (isGL2 || instancing)) run(); else report(true);
