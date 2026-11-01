@@ -28,6 +28,8 @@ let audio = SILENCE;
 let lastAudioTime = 0;
 let song = null;
 let captionTimer = null;
+let lyricsData = null;
+let lyricPosition = null;
 
 function compile(type, source) {
   const shader = gl.createShader(type);
@@ -126,6 +128,10 @@ function draw(now) {
   // A lost iPad must leave the visual drifting calmly, not frozen on its last loud frame.
   else if (now - lastAudioTime > 3000) audio = { ...SILENCE, onsetCount: audio.onsetCount };
 
+  if (preset.updateLyrics) {
+    const age = (now - lastAudioTime) / 1000;
+    preset.updateLyrics(lyricsData, isDemo ? demoLyricTime(now) : lyricPosition === null ? null : lyricPosition + age);
+  }
   preset.update(dt, audio, song);
   lines.clear();
   preset.emit(lines);
@@ -164,6 +170,8 @@ function styleCaption(palette, isDark) {
 
 function showCaption(next) {
   song = next;
+  // The lyrics screen writes the title itself.
+  if (config.preset === 'lyrik') { captionEl.style.opacity = 0; return; }
   captionEl.textContent = next.title;
   const artist = document.createElement('small');
   artist.textContent = next.artist;
@@ -188,12 +196,16 @@ function handle(message, reply) {
     case 'lyric':
       showLyric(message.line, message.next);
       break;
+    case 'lyrics':
+      lyricsData = message;
+      break;
     case 'f':
       audio = {
         bands: message.b, bass: message.ba, mid: message.m, high: message.h, energy: message.e,
         onset: message.o, onsetCount: message.c, tempoBPM: message.bpm, tempoConfidence: message.conf, state: message.s,
       };
       lastAudioTime = performance.now();
+      lyricPosition = message.lp >= 0 ? message.lp : null;
       break;
     case 'config': {
       const changed = message.preset !== config.preset;
@@ -214,6 +226,8 @@ function handle(message, reply) {
       break;
   }
 }
+
+function demoLyricTime(now) { return now / 1000; }
 
 function demoFeatures(time) {
   const beat = time * 2, phase = beat - Math.floor(beat);
