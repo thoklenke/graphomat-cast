@@ -554,7 +554,7 @@ class Sinus {
     this.left = margin;
     this.width = width - margin * 2;
     this.top = margin;
-    this.rowCount = 90;
+    this.rowCount = 60;
     this.spacing = (height - margin * 2) / (this.rowCount - 1);
     this.shortest = this.width / (2 * Math.PI * 34);
     this.longest = this.width / (2 * Math.PI * 6);
@@ -589,7 +589,10 @@ class Sinus {
       const level = this.bands[lower] + (this.bands[upper] - this.bands[lower]) * (position - lower);
       const distance = t - this.pulsePosition;
       const pulse = this.pulseStrength * Math.exp(-distance * distance * 90);
-      const amplitude = this.spacing * (1.4 + level * 3.2 + pulse * 2.5);
+      // Amplitude falls toward the bottom. Below 0.65 it stays under half a row, so neighbors can't cross.
+      const flat = Math.min(1, t / 0.65), eased = flat * flat * (3 - 2 * flat);
+      const limit = 1.9 + (0.47 - 1.9) * eased;
+      const amplitude = this.spacing * limit * (0.3 + 0.7 * Math.min(1, level + pulse * 0.6));
       const phase = (this.offset / period) % (2 * Math.PI);
       let px = 0, py = 0;
       for (let sample = 0; sample <= samples; sample++) {
