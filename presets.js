@@ -547,4 +547,157 @@ class Kacheln {
   }
 }
 
-const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter };
+// Sets text as pen strokes in the Hershey Simplex font. See hershey.js.
+const HERSHEY = HERSHEY_GLYPHS.map(data => {
+  const origin = 'R'.charCodeAt(0);
+  const strokes = [];
+  let stroke = [];
+  for (let i = 2; i + 1 < data.length; i += 2) {
+    if (data[i] === ' ') {
+      if (stroke.length > 1) strokes.push(stroke);
+      stroke = [];
+    } else {
+      stroke.push([data.charCodeAt(i) - origin, data.charCodeAt(i + 1) - origin]);
+    }
+  }
+  if (stroke.length > 1) strokes.push(stroke);
+  return { left: data.charCodeAt(0) - origin, right: data.charCodeAt(1) - origin, strokes };
+});
+
+function hersheyCharacters(text) {
+  const replaced = text.replace(/ß/g, 'ss').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-').replace(/\u2026/g, '...').normalize('NFD');
+  const result = [];
+  for (const ch of replaced) {
+    const code = ch.codePointAt(0);
+    if (code === 0x308 && result.length) result[result.length - 1].dots = true;
+    else if (code >= 32 && code <= 126) result.push({ code, dots: false });
+  }
+  return result;
+}
+
+function hersheyRows(text, scale, maxWidth) {
+  const all = hersheyCharacters(text), rows = [];
+  let start = 0, lastSpace = -1, used = 0, index = 0;
+  while (index < all.length) {
+    const glyph = HERSHEY[all[index].code - 32], advance = (glyph.right - glyph.left) * scale;
+    if (all[index].code === 32) lastSpace = index;
+    if (used + advance > maxWidth && index > start) {
+      const end = lastSpace > start ? lastSpace : index;
+      rows.push(all.slice(start, end));
+      start = all[end].code === 32 ? end + 1 : end;
+      index = start; used = 0; lastSpace = -1;
+      continue;
+    }
+    used += advance;
+    index++;
+  }
+  if (start < all.length) rows.push(all.slice(start));
+  return rows;
+}
+
+// Lyrics written by a pen plotter on a roll of paper. Ported from Packages/Presets/Sources/Lyrik.swift.
+class Lyrik {
+  constructor(seed, width, height) {
+    this.width = width; this.height = height;
+    this.margin = Math.min(width, height) * 0.07;
+    this.rowHeight = Math.min(width, height) / 13;
+    this.scale = this.rowHeight / 36;
+    this.blocks = []; this.revision = -1; this.position = null;
+    this.scroll = 0; this.time = 0; this.headerAge = 0; this.bass = 0;
+    this.updateLyrics(null, null);
+  }
+  updateLyrics(data, position) {
+    this.position = position;
+    const revision = data ? data.revision : 0;
+    if (revision === this.revision) return;
+    this.revision = revision;
+    this.layOut(data || { title: '', artist: '', lines: [], message: 'Listening' });
+  }
+  layOut(data) {
+    this.blocks = []; this.scroll = 0; this.headerAge = 0;
+    let y = this.margin + this.rowHeight * 0.6;
+    const make = (text, scale, start, duration) => {
+      const rows = hersheyRows(text, scale, this.width - this.margin * 2);
+      if (!rows.length) return null;
+      const top = y, segments = [];
+      for (const row of rows) {
+        this.strokes(row, this.margin, y, scale, segments);
+        y += this.rowHeight * scale / this.scale;
+      }
+      let total = 0;
+      for (const s of segments) { s[4] = Math.hypot(s[2] - s[0], s[3] - s[1]); total += s[4]; }
+      return { start, duration, segments, total, top, bottom: y };
+    };
+    const add = block => { if (block) this.blocks.push(block); };
+    if (data.title) add(make(data.title, this.scale, null, 3));
+    if (data.artist) add(make(data.artist, this.scale * 0.62, null, 2));
+    if (data.message) { const block = make(data.message, this.scale * 0.62, null, 2); y += this.rowHeight * 0.3; add(block); }
+    y += this.rowHeight * 0.5;
+    data.lines.forEach(([time, text], index) => {
+      if (!text) { y += this.rowHeight * 0.5; return; }
+      const gap = index + 1 < data.lines.length ? data.lines[index + 1][0] - time : 4;
+      add(make(text, this.scale, time, Math.min(6, Math.max(0.6, gap * 0.85))));
+    });
+  }
+  strokes(row, x, baseline, scale, out) {
+    let penX = x;
+    for (const ch of row) {
+      const glyph = HERSHEY[ch.code - 32], originX = penX - glyph.left * scale;
+      for (const stroke of glyph.strokes) {
+        for (let i = 0; i + 1 < stroke.length; i++) {
+          out.push([originX + stroke[i][0] * scale, baseline + stroke[i][1] * scale,
+                    originX + stroke[i + 1][0] * scale, baseline + stroke[i + 1][1] * scale, 0]);
+        }
+      }
+      if (ch.dots) {
+        const dotY = baseline + (ch.code < 97 ? -15 : -9) * scale;
+        for (const offset of [-2.5, 2.5]) out.push([originX + (offset - 0.5) * scale, dotY, originX + (offset + 0.5) * scale, dotY, 0]);
+      }
+      penX += (glyph.right - glyph.left) * scale;
+    }
+  }
+  update(dt, audio) {
+    this.time += dt;
+    this.headerAge += dt;
+    this.bass += (audio.bass - this.bass) * (1 - Math.exp(-dt / (audio.bass > this.bass ? 0.04 : 0.3)));
+    let target = 0;
+    if (this.position !== null) {
+      let current = null;
+      for (const block of this.blocks) if (block.start !== null && block.start <= this.position) current = block;
+      if (current) target = Math.max(0, current.bottom - this.height * 0.62);
+    }
+    this.scroll += (target - this.scroll) * (1 - Math.exp(-dt / 0.7));
+  }
+  emit(lines) {
+    for (const block of this.blocks) {
+      if (block.bottom - this.scroll <= -this.rowHeight || block.top - this.scroll >= this.height + this.rowHeight) continue;
+      let reveal, tremble = 0;
+      if (block.start !== null) {
+        if (this.position === null || this.position < block.start) continue;
+        const elapsed = this.position - block.start;
+        reveal = Math.min(1, elapsed / block.duration);
+        tremble = clamp(1 - (elapsed - block.duration) / 1.5, 0, 1) * this.scale * (0.5 + this.bass * 3.5);
+      } else {
+        reveal = Math.min(1, this.headerAge / block.duration);
+      }
+      this.draw(lines, block, reveal, tremble);
+    }
+  }
+  draw(lines, block, reveal, tremble) {
+    const fadeHeight = this.height * 0.16, scroll = this.scroll, margin = this.margin, time = this.time;
+    const px = (x, y) => tremble > 0 ? x + driftNoise(x * 0.02 + y * 0.013 + time * 2.3, 7) * tremble : x;
+    const py = (x, y) => tremble > 0 ? y - scroll + driftNoise(y * 0.02 + x * 0.011 + time * 1.9, 19) * tremble : y - scroll;
+    let remaining = block.total * reveal;
+    for (const s of block.segments) {
+      if (remaining <= 0) return;
+      const fraction = s[4] > 0 ? Math.min(1, remaining / s[4]) : 1;
+      remaining -= s[4];
+      const alpha = scroll > 0 ? clamp((s[1] - scroll - margin * 0.3) / fadeHeight, 0, 1) : 1;
+      const ex = s[0] + (s[2] - s[0]) * fraction, ey = s[1] + (s[3] - s[1]) * fraction;
+      lines.line(px(s[0], s[1]), py(s[0], s[1]), px(ex, ey), py(ex, ey), alpha);
+    }
+  }
+}
+
+const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter, lyrik: Lyrik };
