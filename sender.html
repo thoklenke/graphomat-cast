@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Graphomat receiver test: sender</title>
+<style>
+  body { font: 16px/1.5 -apple-system, sans-serif; margin: 40px; max-width: 640px; }
+  input { font: inherit; padding: 4px 8px; }
+  pre { background: #f2f2f0; padding: 16px; border-radius: 8px; }
+</style>
+<script>
+const NAMESPACE = 'urn:x-cast:com.klenke.graphomat.perf';
+window.__onGCastApiAvailable = available => {
+  document.getElementById('status').textContent = available ? 'Cast is available.' : 'Cast is not available in this browser.';
+};
+async function start() {
+  const context = cast.framework.CastContext.getInstance();
+  context.setOptions({
+    receiverApplicationId: document.getElementById('appId').value.trim(),
+    autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+  });
+  const error = await context.requestSession();
+  if (error) {
+    document.getElementById('status').textContent = 'Could not start: ' + error;
+    return;
+  }
+  document.getElementById('status').textContent = 'Running on the TV. This takes about a minute.';
+  context.getCurrentSession().addMessageListener(NAMESPACE, (_, message) => {
+    const update = typeof message === 'string' ? JSON.parse(message) : message;
+    document.getElementById('results').textContent = [update.info, ...update.results.map(r =>
+      `${r.lines} lines: ${r.fps.toFixed(1)} fps, worst frame ${r.worstMs.toFixed(0)} ms`)].join('\n')
+      + (update.done ? '\nDone.' : '');
+  });
+}
+</script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+</head>
+<body>
+<h1>Receiver test</h1>
+<p>Open in Chrome on the same Wi-Fi as the TV.</p>
+<p><label>Receiver App ID <input id="appId"></label> <button onclick="start()">Cast to TV</button></p>
+<p id="status">Loading…</p>
+<pre id="results">No results yet.</pre>
+</body>
+</html>
