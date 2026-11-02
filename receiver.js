@@ -115,7 +115,12 @@ let plotterProgress = 0;
 let frameAverage = 16.7;
 let last = 0;
 
+const INTRO_SECONDS = MARK_DURATION + 0.5, INTRO_FADE = 0.6;
+const skipIntro = params.has('nointro');
+let firstFrame = 0;
+
 function draw(now) {
+  if (!firstFrame) firstFrame = now;
   const elapsed = last ? now - last : 16.7;
   last = now;
   const dt = Math.min(elapsed / 1000, 0.1);
@@ -134,14 +139,24 @@ function draw(now) {
   }
   preset.update(dt, audio, song);
   lines.clear();
-  preset.emit(lines);
+  // The pen plots the logo first, then it fades as the visual fades in, both on the paper color.
+  const introTime = (now - firstFrame) / 1000;
+  const inIntro = !skipIntro && introTime < INTRO_SECONDS + INTRO_FADE;
+  const fade = clamp((introTime - INTRO_SECONDS) / INTRO_FADE, 0, 1);
+  if (inIntro) {
+    emitMark(lines, width, height, introTime);
+    for (let i = 0, n = lines.count * 5; i < n; i += 5) lines.data[i + 4] *= 1 - fade;
+  }
+  const markCount = lines.count;
+  if (!inIntro || fade > 0) preset.emit(lines);
+  if (inIntro) for (let i = markCount * 5, n = lines.count * 5; i < n; i += 5) lines.data[i + 4] *= fade;
   if (config.plotter) {
     plotterProgress = Math.min(1, plotterProgress + dt / 25);
     lines.truncate(plotterProgress);
   }
 
-  const palette = PALETTES[config.appearance] || PALETTES.paper;
-  const halfWidth = Math.max(0.6, Math.min(width, height) / 1050);
+  const palette = inIntro ? PALETTES.paper : PALETTES[config.appearance] || PALETTES.paper;
+  const halfWidth = Math.max(0.6, Math.min(width, height) / (inIntro && fade === 0 ? 390 : 1050));
   gl.uniform1f(uniform('halfWidth'), halfWidth);
   gl.uniform1f(uniform('reach'), halfWidth + 1);
   gl.uniform1f(uniform('cap'), halfWidth + 1);
