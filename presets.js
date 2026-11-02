@@ -455,6 +455,9 @@ class Kacheln {
     this.originX = (width - this.columns * this.size) / 2;
     this.originY = (height - this.rows * this.size) / 2;
     this.spread = 0.16; this.lastOnset = 0; this.sinceDrift = 0;
+    // Loudness over the last moment, and over the last while, to notice a section getting bigger.
+    this.recent = 0; this.usual = 0.3;
+    this.power = 0; this.kick = 0; this.waves = []; this.sinceWave = 0;
     this.tiles = [];
     for (let i = 0; i < this.columns * this.rows; i++) {
       const form = this.rollForm();
@@ -484,36 +487,62 @@ class Kacheln {
   update(dt, audio) {
     const target = 0.16 + audio.bass * 0.035;
     this.spread += (target - this.spread) * (1 - Math.exp(-dt / (target > this.spread ? 0.05 : 0.35)));
+    this.recent += (audio.energy - this.recent) * (1 - Math.exp(-dt / (audio.energy > this.recent ? 0.35 : 1.2)));
+    this.usual += (this.recent - this.usual) * (1 - Math.exp(-dt / 18));
+    let powerTarget = 0;
+    if (audio.state === 'music') {
+      const eased = (low, high, value) => { const t = clamp((value - low) / (high - low), 0, 1); return t * t * (3 - 2 * t); };
+      powerTarget = Math.min(1, eased(0.02, 0.2, this.recent - this.usual) * 0.9 + eased(0.3, 0.7, this.recent) * 0.6);
+    }
+    this.power += (powerTarget - this.power) * (1 - Math.exp(-dt / (powerTarget > this.power ? 0.25 : 0.8)));
+    this.kick *= Math.exp(-dt / 0.15);
+    this.sinceWave += dt;
     if (audio.onsetCount !== this.lastOnset) {
       this.lastOnset = audio.onsetCount;
-      this.changeCluster(2 + Math.floor(audio.onset * 10));
+      this.kick = Math.max(this.kick, audio.onset * this.power);
+      this.changeCluster(Math.floor((2 + Math.floor(audio.onset * 10)) * (1 + this.power * 2)));
+      if (this.power > 0.55 && audio.onset > 0.4 && this.sinceWave > 1.2 && this.waves.length < 2) {
+        this.sinceWave = 0;
+        this.waves.push({ x: this.random.int(0, this.columns - 1), y: this.random.int(0, this.rows - 1), radius: 0 });
+      }
     }
+    // A ring spreading from one tile, turning each tile as it passes.
+    for (const wave of this.waves) {
+      const inner = wave.radius, outer = inner + 34 * dt;
+      wave.radius = outer;
+      for (let i = 0; i < this.tiles.length; i++) {
+        const distance = Math.hypot(i % this.columns - wave.x, Math.floor(i / this.columns) - wave.y);
+        if (distance >= inner && distance < outer) this.change(i);
+      }
+    }
+    this.waves = this.waves.filter(wave => wave.radius <= this.columns + this.rows);
     this.sinceDrift += dt;
     if (this.sinceDrift > (audio.state === 'music' ? 1.5 : audio.state === 'quiet' ? 2.5 : 6)) {
       this.sinceDrift = 0;
       this.change(this.random.int(0, this.tiles.length - 1));
     }
-    const step = dt / 0.45;
+    const step = dt / (0.45 - this.power * 0.25);
     for (const tile of this.tiles) if (tile.progress < 1) tile.progress = Math.min(1, tile.progress + step);
   }
   emit(lines) {
     const x0 = this.originX, y0 = this.originY, x1 = x0 + this.columns * this.size, y1 = y0 + this.rows * this.size;
     lines.line(x0, y0, x1, y0); lines.line(x1, y0, x1, y1); lines.line(x1, y1, x0, y1); lines.line(x0, y1, x0, y0);
     const sides = Math.max(5, Math.floor(9 * lines.detail));
+    const weight = 1 + this.power * 2.4 + this.kick * 1.4;
     this.tiles.forEach((tile, index) => {
       const cx = x0 + (index % this.columns + 0.5) * this.size;
       const cy = y0 + (Math.floor(index / this.columns) + 0.5) * this.size;
       const p = tile.progress, eased = p * p * (3 - 2 * p);
       const angle = (tile.turn - (1 - eased)) * Math.PI / 2;
       if (p >= 1 || tile.form === tile.previousForm) {
-        this.draw(lines, tile.form, cx, cy, angle, 1, sides);
+        this.draw(lines, tile.form, cx, cy, angle, 1, weight, sides);
       } else {
-        this.draw(lines, tile.previousForm, cx, cy, angle, 1 - eased, sides);
-        this.draw(lines, tile.form, cx, cy, angle, eased, sides);
+        this.draw(lines, tile.previousForm, cx, cy, angle, 1 - eased, weight, sides);
+        this.draw(lines, tile.form, cx, cy, angle, eased, weight, sides);
       }
     });
   }
-  draw(lines, form, cx, cy, angle, alpha, sides) {
+  draw(lines, form, cx, cy, angle, alpha, weight, sides) {
     const half = this.size / 2, gap = this.size * this.spread;
     const cos = Math.cos(angle), sin = Math.sin(angle);
     const arc = (x, y, radius, from, count) => {
@@ -522,7 +551,7 @@ class Kacheln {
         const a = from + i / count * Math.PI / 2;
         const lx = x + radius * Math.cos(a), ly = y + radius * Math.sin(a);
         const qx = cx + lx * cos - ly * sin, qy = cy + lx * sin + ly * cos;
-        if (i > 0) lines.line(px, py, qx, qy, alpha);
+        if (i > 0) lines.line(px, py, qx, qy, alpha, 0, weight);
         px = qx; py = qy;
       }
     };
@@ -540,7 +569,7 @@ class Kacheln {
       }
     } else if (form === 1) {
       for (const x of [-gap, 0, gap]) {
-        lines.line(cx + x * cos + half * sin, cy + x * sin - half * cos, cx + x * cos - half * sin, cy + x * sin + half * cos, alpha);
+        lines.line(cx + x * cos + half * sin, cy + x * sin - half * cos, cx + x * cos - half * sin, cy + x * sin + half * cos, alpha, 0, weight);
       }
       cap(-half, 0, -Math.PI / 2);
       cap(half, 0, Math.PI / 2);
