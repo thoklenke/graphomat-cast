@@ -700,4 +700,53 @@ class Lyrik {
   }
 }
 
+// The Rapport logo and name, plotted at startup. Ported from Packages/Presets/Sources/RapportMark.swift.
+const MARK_DURATION = 2.6;
+
+function markLogo(cx, cy, size, settle) {
+  const unit = size / 2, half = 0.5, gap = 0.17, result = [];
+  [[-0.5, -0.5, 0], [0.5, -0.5, Math.PI / 2], [-0.5, 0.5, Math.PI / 2], [0.5, 0.5, 0]].forEach(([tx, ty, base], index) => {
+    const progress = clamp(settle * 1.6 - index * 0.2, 0, 1), eased = progress * progress * (3 - 2 * progress);
+    const angle = base + (1 - eased) * (index % 2 ? -1 : 1) * Math.PI / 2;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    for (const radius of [half - gap, half, half + gap]) {
+      for (const [ox, oy, from] of [[-half, -half, 0], [half, half, Math.PI]]) {
+        const line = [];
+        for (let step = 0; step <= 18; step++) {
+          const a = from + step / 18 * Math.PI / 2;
+          const x = ox + Math.cos(a) * radius, y = oy + Math.sin(a) * radius;
+          line.push([cx + (tx + x * cos - y * sin) * unit, cy + (ty + x * sin + y * cos) * unit]);
+        }
+        result.push(line);
+      }
+    }
+  });
+  return result;
+}
+
+function emitMark(lines, width, height, t) {
+  const side = Math.min(width, height);
+  const plot = (polylines, reveal) => {
+    let total = 0;
+    for (const l of polylines) for (let i = 1; i < l.length; i++) total += Math.hypot(l[i][0] - l[i - 1][0], l[i][1] - l[i - 1][1]);
+    let remaining = total * reveal;
+    for (const l of polylines) {
+      for (let i = 1; i < l.length; i++) {
+        if (remaining <= 0) return;
+        const d = Math.hypot(l[i][0] - l[i - 1][0], l[i][1] - l[i - 1][1]);
+        lines.stroke(l[i - 1][0], l[i - 1][1], l[i][0], l[i][1], d > 0 ? remaining / d : 1);
+        remaining -= d;
+      }
+    }
+  };
+  const plotted = clamp(t, 0, 1);
+  plot(markLogo(width / 2, height * 0.42, side * 0.35, clamp((t - 0.7) / 1.1, 0, 1)), plotted * plotted * (3 - 2 * plotted));
+  const scale = side * 0.0039, row = hersheyCharacters('Rapport');
+  let textWidth = 0;
+  for (const ch of row) { const g = HERSHEY[ch.code - 32]; textWidth += (g.right - g.left) * scale; }
+  const segments = [];
+  Lyrik.prototype.strokes.call(null, row, (width - textWidth) / 2, height * 0.76, scale, segments);
+  plot(segments.map(s => [[s[0], s[1]], [s[2], s[3]]]), clamp(t - 1.5, 0, 1));
+}
+
 const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter, lyrik: Lyrik };
