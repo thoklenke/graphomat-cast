@@ -528,7 +528,7 @@ class Kacheln {
     const x0 = this.originX, y0 = this.originY, x1 = x0 + this.columns * this.size, y1 = y0 + this.rows * this.size;
     lines.line(x0, y0, x1, y0); lines.line(x1, y0, x1, y1); lines.line(x1, y1, x0, y1); lines.line(x0, y1, x0, y0);
     const sides = Math.max(5, Math.floor(9 * lines.detail));
-    const weight = 1 + this.power * 2.4 + this.kick * 1.4;
+    const weight = 1 + this.power * 0.7 + this.kick * 0.7;
     this.tiles.forEach((tile, index) => {
       const cx = x0 + (index % this.columns + 0.5) * this.size;
       const cy = y0 + (Math.floor(index / this.columns) + 0.5) * this.size;
