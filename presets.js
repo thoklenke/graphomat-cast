@@ -29,18 +29,24 @@ function driftNoise(t, seed) {
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
+// Words per line: a, b, alpha, width, then a color packed with red in the low byte.
+const LINE_WORDS = 7;
+const lineColor = hex => (((hex >> 16) & 0xFF) | (hex & 0xFF00) | ((hex & 0xFF) << 16) | 0xFF000000) >>> 0;
+
 class LineBuffer {
   constructor(capacity) {
-    this.data = new Float32Array(capacity * 5);
+    this.data = new Float32Array(capacity * LINE_WORDS);
+    this.packed = new Uint32Array(this.data.buffer);
     this.capacity = capacity;
     this.count = 0;
     this.detail = 1;
   }
   clear() { this.count = 0; }
-  line(ax, ay, bx, by, alpha = 1) {
+  line(ax, ay, bx, by, alpha = 1, color = 0, width = 1) {
     if (alpha <= 0.001 || this.count >= this.capacity) return;
-    const n = this.count++ * 5, d = this.data;
-    d[n] = ax; d[n + 1] = ay; d[n + 2] = bx; d[n + 3] = by; d[n + 4] = alpha;
+    const n = this.count++ * LINE_WORDS, d = this.data;
+    d[n] = ax; d[n + 1] = ay; d[n + 2] = bx; d[n + 3] = by; d[n + 4] = alpha; d[n + 5] = width;
+    this.packed[n + 6] = color;
   }
   stroke(ax, ay, bx, by, reveal, alpha = 1) {
     if (reveal <= 0) return;
@@ -61,7 +67,7 @@ class LineBuffer {
     const exact = this.count * Math.max(0, fraction);
     const whole = Math.floor(exact);
     if (whole >= this.count) return;
-    const n = whole * 5, d = this.data, partial = exact - whole;
+    const n = whole * LINE_WORDS, d = this.data, partial = exact - whole;
     d[n + 2] = d[n] + (d[n + 2] - d[n]) * partial;
     d[n + 3] = d[n + 1] + (d[n + 3] - d[n + 1]) * partial;
     this.count = whole + 1;
@@ -749,4 +755,136 @@ function emitMark(lines, width, height, t) {
   plot(segments.map(s => [[s[0], s[1]], [s[2], s[3]]]), clamp(t - 1.5, 0, 1));
 }
 
-const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter, lyrik: Lyrik };
+// After Zdeněk Sýkora, Lines (Linie), from 1973. Ported from Linie.swift.
+class Linie {
+  constructor(seed, width, height) {
+    this.random = new SeededRandom(seed);
+    this.width = width; this.height = height;
+    this.unit = Math.min(width, height) / 11;
+    this.spacing = this.unit / 7;
+    this.strokes = [];
+    this.lastOnset = 0; this.sinceSpawn = 0; this.boost = 0;
+    for (let i = 0; i < 3; i++) this.spawnBundle(3);
+    // The picture is already under way when it first appears.
+    for (const stroke of this.strokes) stroke.head = stroke.points.length / 2 * this.random.range(0.4, 1);
+  }
+  spawnBundle(size) {
+    const columns = Math.floor(this.width / this.unit), rows = Math.floor(this.height / this.unit);
+    const nodeX = this.random.int(1, Math.max(1, columns - 1)) * this.unit;
+    const nodeY = this.random.int(1, Math.max(1, rows - 1)) * this.unit;
+    const first = this.random.int(0, 3);
+    for (let i = 0; i < size && this.strokes.length < Linie.MOST; i++) this.strokes.push(this.makeStroke(nodeX, nodeY, first + i));
+  }
+  makeStroke(startX, startY, firstHeading) {
+    const random = this.random, roll = random.unit();
+    let lineWidth, band;
+    if (roll < 0.35) { lineWidth = 2.5; band = random.int(10, 15); }
+    else if (roll < 0.7) { lineWidth = 5; band = random.int(5, 9); }
+    else if (roll < 0.9) { lineWidth = 9; band = random.int(1, 4); }
+    else { lineWidth = 15; band = random.int(0, 2); }
+
+    const points = [startX, startY];
+    let x = startX, y = startY, heading = firstHeading & 3;
+    const unit = this.unit, spacing = this.spacing, D = Linie.DIRECTIONS;
+    for (let move = 0, moves = random.int(5, 14); move < moves; move++) {
+      const [dx, dy] = D[heading];
+      if (random.unit() < 0.3) {
+        const length = unit * random.int(1, 3), count = Math.max(1, Math.floor(length / spacing));
+        for (let step = 1; step <= count; step++) points.push(x + dx * length * step / count, y + dy * length * step / count);
+        x += dx * length; y += dy * length;
+      } else {
+        // A quarter circle, turning back toward the middle more often than not near an edge.
+        let turn = random.unit() < 0.5 ? 1 : -1;
+        const outX = x - this.width / 2, outY = y - this.height / 2;
+        const nearEdge = Math.abs(outX) > this.width * 0.3 || Math.abs(outY) > this.height * 0.3;
+        if (nearEdge && random.unit() < 0.7) {
+          const [nx, ny] = D[(heading + turn + 4) & 3];
+          if (nx * outX + ny * outY > 0) turn = -turn;
+        }
+        const radius = unit * random.int(1, 2);
+        const [sx, sy] = D[(heading + turn + 4) & 3];
+        const count = Math.max(2, Math.floor(radius * Math.PI / 2 / spacing));
+        for (let step = 1; step <= count; step++) {
+          const angle = step / count * Math.PI / 2, s = Math.sin(angle) * radius, c = (1 - Math.cos(angle)) * radius;
+          points.push(x + dx * s + sx * c, y + dy * s + sy * c);
+        }
+        x += (dx + sx) * radius; y += (dy + sy) * radius;
+        heading = (heading + turn + 4) & 3;
+      }
+      const beyond = unit * 1.5;
+      if (x < -beyond || y < -beyond || x > this.width + beyond || y > this.height + beyond) break;
+    }
+    return {
+      points, color: Linie.COLORS[random.int(0, Linie.COLORS.length - 1)], width: lineWidth, band,
+      head: 0, tail: 0, hold: random.range(5, 14), swell: 0,
+    };
+  }
+  update(dt, audio) {
+    this.sinceSpawn += dt;
+    this.boost *= Math.exp(-dt / 0.35);
+    if (audio.onsetCount !== this.lastOnset) {
+      this.lastOnset = audio.onsetCount;
+      this.boost = Math.min(2, this.boost + audio.onset * 1.2);
+      if (this.sinceSpawn > 0.18) {
+        this.sinceSpawn = 0;
+        // A full picture makes room by letting its oldest line go.
+        if (this.strokes.length >= Linie.MOST) {
+          const oldest = this.strokes.find(stroke => stroke.hold > 0);
+          if (oldest) oldest.hold = 0;
+        }
+        this.spawnBundle(1 + Math.floor(Math.min(1, audio.onset) * 3));
+      }
+    }
+    if (this.strokes.length < Linie.FEWEST && this.sinceSpawn > 2.5) {
+      this.sinceSpawn = 0;
+      this.spawnBundle(2);
+    }
+    const pace = audio.state === 'music' ? 18 + audio.energy * 55 : audio.state === 'quiet' ? 8 : 5;
+    const speed = pace * (1 + this.boost), waiting = audio.state === 'music' ? dt : dt * 0.4;
+    for (const stroke of this.strokes) {
+      const count = stroke.points.length / 2;
+      if (stroke.head < count) stroke.head = Math.min(count, stroke.head + speed * dt);
+      else if (stroke.hold > 0) stroke.hold -= waiting;
+      else stroke.tail += speed * dt;
+      const level = audio.bands[stroke.band] || 0;
+      const rate = level > stroke.swell ? 0.04 : 0.28;
+      stroke.swell += (level - stroke.swell) * (1 - Math.exp(-dt / rate));
+    }
+    this.strokes = this.strokes.filter(stroke => stroke.tail < stroke.points.length / 2 - 1);
+  }
+  emit(lines) {
+    const skip = lines.detail < 0.75 ? 2 : 1;
+    // Widest first, so thin lines stay visible where they cross.
+    for (const widthClass of [15, 9, 5, 2.5]) {
+      for (const stroke of this.strokes) if (stroke.width === widthClass) this.emitStroke(stroke, skip, lines);
+    }
+  }
+  emitStroke(stroke, skip, lines) {
+    const points = stroke.points, last = points.length / 2 - 1;
+    if (last <= 0) return;
+    const at = place => {
+      const clamped = clamp(place, 0, last), index = Math.min(Math.floor(clamped), last - 1), f = clamped - index;
+      return [points[index * 2] + (points[index * 2 + 2] - points[index * 2]) * f, points[index * 2 + 1] + (points[index * 2 + 3] - points[index * 2 + 1]) * f];
+    };
+    const lineWidth = stroke.width * (1 + stroke.swell * 0.7);
+    let [px, py] = at(stroke.tail);
+    let place = Math.floor(stroke.tail) + skip;
+    const end = Math.min(stroke.head, last);
+    while (place < end) {
+      const nx = points[place * 2], ny = points[place * 2 + 1];
+      lines.line(px, py, nx, ny, 1, stroke.color, lineWidth);
+      px = nx; py = ny;
+      place += skip;
+    }
+    if (stroke.head > stroke.tail) {
+      const [hx, hy] = at(stroke.head);
+      lines.line(px, py, hx, hy, 1, stroke.color, lineWidth);
+    }
+  }
+}
+Linie.MOST = 28;
+Linie.FEWEST = 7;
+Linie.DIRECTIONS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+Linie.COLORS = [0xE8321E, 0x1446C8, 0x0A9A5B, 0xF2B705, 0xD6126E, 0x6A2BB8, 0xF5741F, 0x12A7E0].map(lineColor);
+
+const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter, linie: Linie, lyrik: Lyrik };
