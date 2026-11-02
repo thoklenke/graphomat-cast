@@ -45,33 +45,40 @@ gl.attachShader(program, compile(gl.VERTEX_SHADER, `
   attribute vec2 a;
   attribute vec2 b;
   attribute float alpha;
+  attribute float lineWidth;
+  attribute vec4 tint;
   uniform vec2 viewport;
-  uniform float reach;
-  uniform float cap;
+  uniform float halfWidth;
+  uniform vec3 color;
   varying vec2 local;
   varying float len;
   varying float light;
+  varying float lineHalfWidth;
+  varying vec3 shade;
   void main() {
     vec2 delta = b - a;
     len = max(length(delta), 0.0001);
     vec2 dir = delta / len;
     vec2 normal = vec2(-dir.y, dir.x);
-    local = vec2(corner.x * (len + 2.0 * cap) - cap, corner.y * reach);
+    lineHalfWidth = halfWidth * lineWidth;
+    float reach = lineHalfWidth + 1.0;
+    shade = tint.a > 0.5 ? tint.rgb : color;
+    local = vec2(corner.x * (len + 2.0 * reach) - reach, corner.y * reach);
     vec2 pixel = a + dir * local.x + normal * local.y;
     light = alpha;
     gl_Position = vec4(pixel.x / viewport.x * 2.0 - 1.0, 1.0 - pixel.y / viewport.y * 2.0, 0.0, 1.0);
   }`));
 gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `
   precision highp float;
-  uniform float halfWidth;
-  uniform vec3 color;
   varying vec2 local;
   varying float len;
   varying float light;
+  varying float lineHalfWidth;
+  varying vec3 shade;
   void main() {
     float h = clamp(local.x, 0.0, len);
-    float c = clamp(halfWidth + 0.5 - length(local - vec2(h, 0.0)), 0.0, 1.0) * light;
-    gl_FragColor = vec4(color * c, c);
+    float c = clamp(lineHalfWidth + 0.5 - length(local - vec2(h, 0.0)), 0.0, 1.0) * light;
+    gl_FragColor = vec4(shade * c, c);
   }`));
 gl.linkProgram(program);
 if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
@@ -89,10 +96,14 @@ const lines = new LineBuffer(40000);
 const lineBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
 gl.bufferData(gl.ARRAY_BUFFER, lines.data.byteLength, gl.DYNAMIC_DRAW);
-for (const [name, size, offset] of [['a', 2, 0], ['b', 2, 8], ['alpha', 1, 16]]) {
+const LINE_BYTES = LINE_WORDS * 4;
+for (const [name, size, offset, type, normalized] of [
+  ['a', 2, 0, gl.FLOAT, false], ['b', 2, 8, gl.FLOAT, false], ['alpha', 1, 16, gl.FLOAT, false],
+  ['lineWidth', 1, 20, gl.FLOAT, false], ['tint', 4, 24, gl.UNSIGNED_BYTE, true],
+]) {
   const location = gl.getAttribLocation(program, name);
   gl.enableVertexAttribArray(location);
-  gl.vertexAttribPointer(location, size, gl.FLOAT, false, 20, offset);
+  gl.vertexAttribPointer(location, size, type, normalized, LINE_BYTES, offset);
   gl.vertexAttribDivisor(location, 1);
 }
 gl.enable(gl.BLEND);
@@ -145,11 +156,11 @@ function draw(now) {
   const fade = clamp((introTime - INTRO_SECONDS) / INTRO_FADE, 0, 1);
   if (inIntro) {
     emitMark(lines, width, height, introTime);
-    for (let i = 0, n = lines.count * 5; i < n; i += 5) lines.data[i + 4] *= 1 - fade;
+    for (let i = 0, n = lines.count * LINE_WORDS; i < n; i += LINE_WORDS) lines.data[i + 4] *= 1 - fade;
   }
   const markCount = lines.count;
   if (!inIntro || fade > 0) preset.emit(lines);
-  if (inIntro) for (let i = markCount * 5, n = lines.count * 5; i < n; i += 5) lines.data[i + 4] *= fade;
+  if (inIntro) for (let i = markCount * LINE_WORDS, n = lines.count * LINE_WORDS; i < n; i += LINE_WORDS) lines.data[i + 4] *= fade;
   if (config.plotter) {
     plotterProgress = Math.min(1, plotterProgress + dt / 25);
     lines.truncate(plotterProgress);
@@ -158,12 +169,10 @@ function draw(now) {
   const palette = inIntro ? PALETTES.paper : PALETTES[config.appearance] || PALETTES.paper;
   const halfWidth = Math.max(0.6, Math.min(width, height) / (inIntro && fade === 0 ? 390 : 1050));
   gl.uniform1f(uniform('halfWidth'), halfWidth);
-  gl.uniform1f(uniform('reach'), halfWidth + 1);
-  gl.uniform1f(uniform('cap'), halfWidth + 1);
   gl.uniform3fv(uniform('color'), palette.line);
   gl.clearColor(palette.background[0], palette.background[1], palette.background[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  gl.bufferSubData(gl.ARRAY_BUFFER, 0, lines.data.subarray(0, lines.count * 5));
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, lines.data.subarray(0, lines.count * LINE_WORDS));
   gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, lines.count);
 
   styleCaption(palette, config.appearance === 'dark');
