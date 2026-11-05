@@ -29,6 +29,7 @@ let lastAudioTime = 0;
 let song = null;
 let captionTimer = null;
 let lyricsData = null;
+let outlineWords = [];
 let lyricPosition = null;
 
 function compile(type, source) {
@@ -220,7 +221,12 @@ function handle(message, reply) {
     case 'lyric':
       showLyric(message.line, message.next);
       break;
+    case 'outlines':
+      if (message.start === 0) outlineWords = [];
+      message.words.forEach((word, index) => { outlineWords[message.start + index] = decodeOutlineWord(word); });
+      break;
     case 'lyrics':
+      message.words = outlineWords;
       lyricsData = message;
       break;
     case 'f':
