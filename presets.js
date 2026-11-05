@@ -525,6 +525,101 @@ class Korridor {
   }
 }
 
+// After Vera Molnár, Interruptions, 1968-69. The angles and the patches are tuned by eye against the prints.
+class Interruptions {
+  constructor(seed, width, height) {
+    this.random = new SeededRandom(seed);
+    const margin = Math.min(width, height) * 0.07;
+    const cell = (Math.min(width, height) - margin * 2) / 48;
+    this.length = cell * 2.3;
+    const columns = Math.floor((width - margin * 2) / cell), rows = Math.floor((height - margin * 2) / cell);
+    const originX = (width - columns * cell) / 2, originY = (height - rows * cell) / 2;
+    this.noiseSize = 64;
+    this.noise = new Float32Array(this.noiseSize * this.noiseSize);
+    for (let i = 0; i < this.noise.length; i++) this.noise[i] = this.random.unit();
+    this.strokes = [];
+    for (let row = 0; row < rows; row++) {
+      for (let column = 0; column < columns; column++) {
+        this.strokes.push({
+          cx: originX + (column + 0.5) * cell, cy: originY + (row + 0.5) * cell, x: column, y: row,
+          turn: this.random.range(-1, 1), phase: this.random.range(0, 2 * Math.PI),
+          edge: this.random.unit(), rank: this.random.unit(), gone: 0,
+        });
+      }
+    }
+    this.lastOnset = 0; this.drift = 0; this.clock = 0; this.bass = 0; this.high = 0;
+    this.refreshShare = 8; this.refreshOffset = 0;
+    for (const stroke of this.strokes) this.refresh(stroke);
+    // Loudness over the last moment, and over the last while, to notice a section getting bigger.
+    this.recent = 0; this.usual = 0.3; this.power = 0;
+  }
+  update(dt, audio) {
+    this.clock += dt;
+    // Calm or silent, the patches hardly move, but they never quite stop.
+    this.drift += dt * (0.1 + audio.energy * 0.7);
+    this.bass += (audio.bass - this.bass) * (1 - Math.exp(-dt / (audio.bass > this.bass ? 0.08 : 0.6)));
+    this.high += (audio.high - this.high) * (1 - Math.exp(-dt / (audio.high > this.high ? 0.05 : 0.3)));
+    this.recent += (audio.energy - this.recent) * (1 - Math.exp(-dt / (audio.energy > this.recent ? 0.35 : 1.2)));
+    this.usual += (this.recent - this.usual) * (1 - Math.exp(-dt / 18));
+    let powerTarget = 0;
+    if (audio.state === 'music') {
+      const eased = (low, high, value) => { const t = clamp((value - low) / (high - low), 0, 1); return t * t * (3 - 2 * t); };
+      powerTarget = Math.min(1, eased(0.02, 0.2, this.recent - this.usual) * 0.9 + eased(0.3, 0.7, this.recent) * 0.6);
+    }
+    this.power += (powerTarget - this.power) * (1 - Math.exp(-dt / (powerTarget > this.power ? 0.3 : 1.5)));
+    for (let i = this.refreshOffset; i < this.strokes.length; i += this.refreshShare) this.refresh(this.strokes[i]);
+    this.refreshOffset = (this.refreshOffset + 1) % this.refreshShare;
+    const regrow = Math.exp(-dt / 1.2);
+    for (const stroke of this.strokes) if (stroke.gone > 0.01) stroke.gone *= regrow;
+    if (audio.onsetCount !== this.lastOnset) {
+      this.lastOnset = audio.onsetCount;
+      this.eraseSpot(1 + audio.onset * (1.5 + this.power * 2));
+    }
+  }
+  // Read from the noise now and then, because these change slowly.
+  refresh(stroke) {
+    const x = stroke.x, y = stroke.y, drift = this.drift;
+    stroke.patch = 0.65 * this.sample(x / 7 + drift * 0.05, y / 7 + 11) + 0.35 * this.sample(x / 3 + 23, y / 3 - drift * 0.08);
+    stroke.wind = (this.sample(x / 14 + drift * 0.12, y / 14 + 37) - 0.5) * 2;
+  }
+  eraseSpot(radius) {
+    const spot = this.strokes[this.random.int(0, this.strokes.length - 1)];
+    for (const stroke of this.strokes) {
+      const dx = stroke.x - spot.x, dy = stroke.y - spot.y;
+      if (dx * dx + dy * dy < radius * radius) stroke.gone = 1;
+    }
+  }
+  // 0...1, smooth and repeating.
+  sample(x, y) {
+    const size = this.noiseSize, noise = this.noise;
+    const ix = Math.floor(x), iy = Math.floor(y), tx = x - ix, ty = y - iy;
+    const x0 = ((ix % size) + size) % size, y0 = ((iy % size) + size) % size;
+    const x1 = (x0 + 1) % size, y1 = (y0 + 1) % size;
+    const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const top = noise[y0 * size + x0] + (noise[y0 * size + x1] - noise[y0 * size + x0]) * sx;
+    const bottom = noise[y1 * size + x0] + (noise[y1 * size + x1] - noise[y1 * size + x0]) * sx;
+    return top + (bottom - top) * sy;
+  }
+  emit(lines) {
+    const half = this.length / 2;
+    // A little more disorder in the angles when the music is intense.
+    const spread = 0.8 + this.power * 0.25, lean = 0.08 + this.bass * 0.45;
+    // Even at the peak the field stays whole, with only a share of it missing.
+    const cutoff = 0.8 - this.power * 0.17;
+    for (const stroke of this.strokes) {
+      // A line erased by a beat returns once `gone` drops below its own `edge`.
+      if (stroke.rank > lines.detail || stroke.gone > stroke.edge) continue;
+      // Lines draw back into their centers as a patch reaches them.
+      const scale = clamp((cutoff - stroke.patch - stroke.edge * 0.03) / 0.025, 0, 1);
+      if (scale <= 0.03) continue;
+      const shimmer = Math.sin(this.clock * 5 + stroke.phase) * this.high * 0.05;
+      const angle = Math.PI / 2 + stroke.turn * spread + stroke.wind * lean + shimmer;
+      const rx = Math.cos(angle) * half * scale, ry = Math.sin(angle) * half * scale;
+      lines.line(stroke.cx - rx, stroke.cy - ry, stroke.cx + rx, stroke.cy + ry);
+    }
+  }
+}
+
 // After Paul Brown, Untitled, Computer Assisted Drawing, 1975. Tile shapes are worked out from the print.
 class Kacheln {
   constructor(seed, width, height) {
@@ -1069,4 +1164,4 @@ Linie.FEWEST = 7;
 Linie.DIRECTIONS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
 Linie.COLORS = [0xE8321E, 0x1446C8, 0x0A9A5B, 0xF2B705, 0xD6126E, 0x6A2BB8, 0xF5741F, 0x12A7E0].map(lineColor);
 
-const PRESETS = { hommage: Hommage, korridor: Korridor, kacheln: Kacheln, schotter: Schotter, linie: Linie, lyrik: Lyrik };
+const PRESETS = { hommage: Hommage, korridor: Korridor, interruptions: Interruptions, kacheln: Kacheln, schotter: Schotter, linie: Linie, lyrik: Lyrik };
