@@ -304,10 +304,18 @@ class Korridor {
   constructor(seed, width, height) {
     this.seed = seed;
     this.chunkLength = 2; this.chunkCount = 11; this.beatSpacing = 0.5;
-    this.wallRows = 17; this.wallColumns = 14; this.near = 0.18;
+    // Grids laid over each other. Their cells don't line up, so the outlines cross. The finer ones appear later.
+    this.wallGrids = [[17, 14], [23, 19], [31, 25]]; this.layerDelay = 0.12; this.bandReach = 0.22;
+    // Only the first grid continues past this depth, so the distance doesn't fill up with ink.
+    this.detailDepth = 9; this.detailFade = 3;
+    this.near = 0.18; this.railCount = 8; this.boxStretch = 1.7;
+    this.floorDepth = 6; this.floorFade = 1;
+    // How much narrower the floor gets per unit ahead, on top of the perspective. Its rails lean inwards.
+    this.floorTaper = 0.08;
     this.cx = width / 2; this.cy = height * 0.54;
     const aspect = width / height;
-    this.halfWidth = aspect >= 1 ? aspect : 1;
+    // The print is portrait. Landscape canvases get a somewhat wider corridor, not a stretched one.
+    this.halfWidth = aspect >= 1 ? Math.sqrt(aspect) : 1;
     this.halfHeight = aspect >= 1 ? 1 : 1 / aspect;
     this.focal = Math.min(width / this.halfWidth, height / this.halfHeight) * 0.42;
     this.cameraZ = 0; this.speed = 0.1; this.corrosion = 0.25; this.branch = 0;
@@ -318,7 +326,8 @@ class Korridor {
   }
   refreshChunks() {
     const first = Math.floor(this.cameraZ / this.chunkLength);
-    this.chunks = this.chunks.filter(c => c.index >= first && c.index < first + this.chunkCount);
+    // The chunk just passed stays, because its boxes can reach into the next one.
+    this.chunks = this.chunks.filter(c => c.index >= first - 1 && c.index < first + this.chunkCount);
     for (let index = first; index < first + this.chunkCount; index++) {
       if (!this.chunks.some(c => c.index === index)) this.chunks.push(this.makeChunk(index));
     }
@@ -326,25 +335,75 @@ class Korridor {
   makeChunk(index) {
     const r = new SeededRandom((this.seed + Math.imul(index, 0x01B3)) | 0);
     const boxes = [];
-    for (let i = 0, n = r.int(1, 3); i < n; i++) {
-      const sy = r.range(0.15, 0.6), sx = r.range(0.08, 0.26), sz = r.range(0.15, 0.6);
-      boxes.push({
-        x: r.range(-0.65, 0.65) * this.halfWidth,
-        y: this.halfHeight * r.range(0.25, 0.9),
-        z: (index + r.unit()) * this.chunkLength,
-        sx, sy, sz, band: r.int(0, 15),
-      });
+    for (let i = 0, n = r.int(6, 11); i < n; i++) {
+      // Mostly small, sometimes tall. Some sit against the previous box, so they gather in groups.
+      const tall = r.unit();
+      const sx = r.range(0.05, 0.22), sy = 0.06 + tall * tall * 0.5, sz = r.range(0.08, 0.5);
+      let x = r.range(-0.65, 0.65) * this.halfWidth;
+      let y = this.halfHeight * r.range(0.3, 0.95);
+      let z = (index + r.unit()) * this.chunkLength;
+      const last = boxes[boxes.length - 1];
+      if (r.unit() < 0.4 && last) {
+        x = last.x + r.range(-0.2, 0.2); y = last.y + r.range(-0.25, 0.25); z = last.z + r.range(-0.3, 0.3);
+      }
+      // High enough that the band stretch never brings it down to the floor grid's level.
+      y = Math.max(y, sy * this.boxStretch / 2 + 0.03);
+      boxes.push({ x, y, z, sx, sy, sz, band: r.int(0, 15) });
     }
-    return { index, boxes, left: this.corrode(r), right: this.corrode(r) };
+    const wall = side => this.wallGrids.map(([rows, columns], layer) => ({
+      rows, columns, order: this.corrode(r, rows, columns, this.wallMask(rows, columns, index, layer, side)),
+    }));
+    const left = wall(0);
+    return { index, boxes, left, right: wall(1) };
   }
-  corrode(r) {
-    const rows = this.wallRows, columns = this.wallColumns;
-    const order = new Float32Array(rows * columns).fill(1.5);
+  // 0...1, drifting smoothly along a position. The same anywhere for the same key, so it joins up across chunks.
+  wander(position, spacing, key) {
+    const knot = i => new SeededRandom((this.seed + Math.imul(key, 0x9E3779B1) + Math.imul(i, 0x01B3)) | 0).unit();
+    const index = Math.floor(position / spacing), t = position / spacing - index;
+    return knot(index) + (knot(index + 1) - knot(index)) * (t * t * (3 - 2 * t));
+  }
+  // Where a wall grid may erode. The rows have no fixed limits: their edges drift along the corridor, and
+  // differently on each grid and wall, so outlines don't line up. A bare band always stays around eye level.
+  // Heights are -1...1, floor to ceiling.
+  wallMask(rows, columns, chunk, layer, side) {
+    const key = layer * 8 + side * 32 + 64;
+    const startZ = chunk * this.chunkLength;
+    const open = new Array(rows * columns).fill(false);
+    const cuts = [];
+    for (let row = 0; row < rows; row++) {
+      const y = (row + 0.5) / rows * 2 - 1, cut = columns * 0.25;
+      cuts.push([Math.floor(this.wander(y, 0.25, key + 4) * cut), Math.floor(this.wander(y, 0.25, key + 5) * cut)]);
+    }
+    for (let column = 0; column < columns; column++) {
+      const z = startZ + (column + 0.5) / columns * this.chunkLength;
+      const floorEdge = -1 + 0.22 * this.wander(z, 0.7, key);
+      const lowerTop = -0.28 + 0.28 * this.wander(z, 0.5, key + 1);
+      const upperBottom = 0.16 + 0.32 * this.wander(z, 0.5, key + 2);
+      const ceiling = 1 - 0.22 * this.wander(z, 0.7, key + 3);
+      for (let row = 0; row < rows; row++) {
+        if (column < cuts[row][0] || column >= columns - cuts[row][1]) continue;
+        const y = (row + 0.5) / rows * 2 - 1;
+        open[row * columns + column] = (y >= floorEdge && y <= lowerTop) || (y >= upperBottom && y <= ceiling);
+      }
+    }
+    return open;
+  }
+  // Each cell records how soon the erosion reached it, from 0 to 1 over the whole wall,
+  // so the full range of corrosion levels changes something.
+  corrode(r, rows, columns, open) {
+    const order = new Float32Array(rows * columns).fill(Infinity);
     const frontier = [];
-    for (let i = 0, n = r.int(2, 4); i < n; i++) {
-      const cell = r.int(0, rows * columns - 1);
-      order[cell] = 0;
-      frontier.push(cell);
+    // Both rows start somewhere, so neither can come out empty.
+    const cells = [];
+    for (let i = 0; i < open.length; i++) if (open[i]) cells.push(i);
+    const middle = Math.floor(rows / 2);
+    for (const group of [cells.filter(c => Math.floor(c / columns) < middle), cells.filter(c => Math.floor(c / columns) >= middle)]) {
+      if (!group.length) continue;
+      for (let i = 0, n = r.int(1, 2); i < n; i++) {
+        const cell = group[r.int(0, group.length - 1)];
+        order[cell] = 0;
+        frontier.push(cell);
+      }
     }
     let step = 0;
     while (frontier.length && step < rows * columns) {
@@ -353,14 +412,15 @@ class Korridor {
       for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         if (r.unit() >= 0.62) continue;
         const nr = row + dr, nc = column + dc;
-        if (nr < 0 || nr >= rows || nc < 0 || nc >= columns) continue;
+        if (nr < 0 || nr >= rows || nc < 0 || nc >= columns || !open[nr * columns + nc]) continue;
         const neighbor = nr * columns + nc;
-        if (order[neighbor] !== 1.5) continue;
+        if (order[neighbor] !== Infinity) continue;
         step++;
-        order[neighbor] = step / (rows * columns);
+        order[neighbor] = step;
         frontier.push(neighbor);
       }
     }
+    if (step > 0) for (let i = 0; i < order.length; i++) if (order[i] !== Infinity) order[i] /= step;
     return order;
   }
   update(dt, audio) {
@@ -369,50 +429,62 @@ class Korridor {
       : audio.state === 'quiet' ? 0.05 : 0.02;
     this.speed += (target - this.speed) * (1 - Math.exp(-dt / 1.2));
     this.cameraZ += this.speed * dt;
-    const corrosion = 0.14 + audio.energy * 0.75;
-    this.corrosion += (corrosion - this.corrosion) * (1 - Math.exp(-dt / (corrosion > this.corrosion ? 0.5 : 2.5)));
+    // Stays well below 1: fully grown, the erosion closes into one plain outline.
+    const corrosion = 0.2 + audio.energy * 0.35;
+    this.corrosion += (corrosion - this.corrosion) * (1 - Math.exp(-dt / (corrosion > this.corrosion ? 0.25 : 1.2)));
     this.branch *= Math.exp(-dt / 0.5);
     const follow = 1 - Math.exp(-dt / 0.14);
     for (let i = 0; i < 16; i++) this.bands[i] += (audio.bands[i] - this.bands[i]) * follow;
     if (audio.onsetCount !== this.lastOnset) {
       this.lastOnset = audio.onsetCount;
       this.onsets++;
-      this.branch = Math.max(this.branch, audio.onset * 0.22);
+      this.branch = Math.max(this.branch, audio.onset * 0.15);
     }
     this.refreshChunks();
   }
   // Clips against the near plane, projects, and fades lines into the distance.
-  draw(lines, ax, ay, az, bx, by, bz) {
+  draw(lines, ax, ay, az, bx, by, bz, fade = 1) {
     const plane = this.cameraZ + this.near;
     if (az < plane && bz < plane) return;
     if (az < plane) { const t = (plane - az) / (bz - az); ax += (bx - ax) * t; ay += (by - ay) * t; az = plane; }
     else if (bz < plane) { const t = (plane - bz) / (az - bz); bx += (ax - bx) * t; by += (ay - by) * t; bz = plane; }
     const far = (this.chunkCount - 1) * this.chunkLength;
-    const alpha = clamp((1 - (Math.min(az, bz) - this.cameraZ) / far) * 3, 0, 1);
+    const alpha = clamp((1 - (Math.min(az, bz) - this.cameraZ) / far) * 3, 0, 1) * fade;
     const da = az - this.cameraZ, db = bz - this.cameraZ;
     lines.line(this.cx + ax / da * this.focal, this.cy - ay / da * this.focal,
                this.cx + bx / db * this.focal, this.cy - by / db * this.focal, alpha);
   }
   emit(lines) {
     const far = this.cameraZ + (this.chunkCount - 1) * this.chunkLength;
-    const floorY = -this.halfHeight, floorX = this.halfWidth * 0.62;
-    for (let rail = 0; rail <= 8; rail++) {
-      const x = (rail / 8 * 2 - 1) * floorX;
-      this.draw(lines, x, floorY, this.cameraZ, x, floorY, far);
+    const floorY = -this.halfHeight, floorX = this.halfWidth * 0.86;
+    // The floor ends well before the vanishing point, and new cross lines fade in there.
+    const floorEnd = this.cameraZ + this.floorDepth;
+    for (let rail = 0; rail < this.railCount; rail++) {
+      const x = (rail / (this.railCount - 1) * 2 - 1) * floorX;
+      this.draw(lines, x, floorY, this.cameraZ, x * (1 - this.floorTaper * this.floorDepth), floorY, floorEnd);
     }
-    for (let z = Math.ceil(this.cameraZ / this.beatSpacing) * this.beatSpacing; z < far; z += this.beatSpacing) {
-      this.draw(lines, -floorX, floorY, z, floorX, floorY, z);
+    // Each cross line runs past the rails by its own amount, which keeps the edge of the floor rough.
+    const railGap = 2 * floorX / (this.railCount - 1);
+    for (let z = Math.ceil(this.cameraZ / this.beatSpacing) * this.beatSpacing; z < floorEnd; z += this.beatSpacing) {
+      const r = new SeededRandom((this.seed + 0x5851 + Math.imul(Math.round(z / this.beatSpacing), 0x01B3)) | 0);
+      const left = railGap * r.range(0.2, 0.9), right = railGap * r.range(0.2, 0.9);
+      const taper = 1 - this.floorTaper * (z - this.cameraZ);
+      const fade = Math.min(1, (floorEnd - z) / this.floorFade);
+      this.draw(lines, (-floorX - left) * taper, floorY, z, (floorX + right) * taper, floorY, z, fade);
     }
     for (const chunk of this.chunks) {
       for (const box of chunk.boxes) this.drawBox(lines, box);
       const flicker = (chunk.index + this.onsets) % 3 === 0 ? this.branch : 0;
-      const level = this.corrosion * lines.detail + flicker;
-      this.drawWall(lines, chunk.left, chunk.index, -this.halfWidth, level);
-      this.drawWall(lines, chunk.right, chunk.index, this.halfWidth, level);
+      // Each stretch of wall also follows its own band, so the sound moves along the corridor.
+      const band = ((chunk.index * 5) % 16 + 16) % 16, opposite = (band + 8) % 16;
+      this.drawWall(lines, chunk.left, chunk.index, -this.halfWidth,
+        (this.corrosion + this.bands[band] * this.bandReach) * lines.detail + flicker);
+      this.drawWall(lines, chunk.right, chunk.index, this.halfWidth,
+        (this.corrosion + this.bands[opposite] * this.bandReach) * lines.detail + flicker);
     }
   }
   drawBox(lines, box) {
-    const hx = box.sx / 2, hy = box.sy * (1 + this.bands[box.band] * 1.6) / 2, hz = box.sz / 2;
+    const hx = box.sx / 2, hy = box.sy * (1 + this.bands[box.band] * (this.boxStretch - 1)) / 2, hz = box.sz / 2;
     const { x, y, z } = box;
     for (const dz of [-hz, hz]) {
       this.draw(lines, x - hx, y - hy, z + dz, x + hx, y - hy, z + dz);
@@ -425,28 +497,38 @@ class Korridor {
     }
   }
   // Outlines each corroded region: an edge is drawn only where a cell and its neighbor differ.
-  drawWall(lines, order, chunk, x, level) {
-    const rows = this.wallRows, columns = this.wallColumns;
-    const cellZ = this.chunkLength / columns, cellY = this.halfHeight * 2 / rows;
+  drawWall(lines, layers, chunk, x, level) {
     const startZ = chunk * this.chunkLength;
-    const on = (r, c) => r >= 0 && r < rows && c >= 0 && c < columns && order[r * columns + c] <= level;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < columns; c++) {
-        if (!on(r, c)) continue;
-        const y0 = -this.halfHeight + r * cellY, y1 = y0 + cellY;
-        const z0 = startZ + c * cellZ, z1 = z0 + cellZ;
-        if (!on(r - 1, c)) this.draw(lines, x, y0, z0, x, y0, z1);
-        if (!on(r + 1, c)) this.draw(lines, x, y1, z0, x, y1, z1);
-        if (!on(r, c - 1)) this.draw(lines, x, y0, z0, x, y1, z0);
-        if (!on(r, c + 1)) this.draw(lines, x, y0, z1, x, y1, z1);
+    layers.forEach((layer, index) => {
+      if (index > 0 && startZ - this.cameraZ > this.detailDepth) return;
+      const { rows, columns, order } = layer;
+      const layerLevel = level - index * this.layerDelay;
+      const cellZ = this.chunkLength / columns, cellY = this.halfHeight * 2 / rows;
+      const on = (r, c) => r >= 0 && r < rows && c >= 0 && c < columns && order[r * columns + c] <= layerLevel;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < columns; c++) {
+          if (!on(r, c)) continue;
+          const y0 = -this.halfHeight + r * cellY, y1 = y0 + cellY;
+          const z0 = startZ + c * cellZ, z1 = z0 + cellZ;
+          let fade = 1;
+          // The lower row ends with the floor, fading in the same way.
+          if (y0 < 0) fade = Math.min(1, (this.cameraZ + this.floorDepth - z1) / this.floorFade);
+          if (index > 0) fade = Math.min(fade, (this.cameraZ + this.detailDepth - z1) / this.detailFade);
+          if (fade <= 0) continue;
+          if (!on(r - 1, c)) this.draw(lines, x, y0, z0, x, y0, z1, fade);
+          if (!on(r + 1, c)) this.draw(lines, x, y1, z0, x, y1, z1, fade);
+          if (!on(r, c - 1)) this.draw(lines, x, y0, z0, x, y1, z0, fade);
+          if (!on(r, c + 1)) this.draw(lines, x, y0, z1, x, y1, z1, fade);
+        }
       }
-    }
+    });
   }
 }
 
 // After Paul Brown, Untitled, Computer Assisted Drawing, 1975. Tile shapes are worked out from the print.
 class Kacheln {
   constructor(seed, width, height) {
+    this.seed = seed;
     this.random = new SeededRandom(seed);
     const margin = Math.min(width, height) * 0.035;
     this.size = (Math.min(width, height) - margin * 2) / 16;
@@ -454,37 +536,67 @@ class Kacheln {
     this.rows = Math.floor((height - margin * 2) / this.size);
     this.originX = (width - this.columns * this.size) / 2;
     this.originY = (height - this.rows * this.size) / 2;
-    this.spread = 0.16; this.lastOnset = 0; this.sinceDrift = 0;
+    this.spread = 0.16; this.lastOnset = 0; this.elapsed = 0; this.pending = 0;
     // Loudness over the last moment, and over the last while, to notice a section getting bigger.
     this.recent = 0; this.usual = 0.3;
-    this.power = 0; this.kick = 0; this.waves = []; this.sinceWave = 0;
+    this.power = 0;
+    // 1 for a picture of closed rings, 0 for tiles at random.
+    this.order = 0.7;
     this.tiles = [];
     for (let i = 0; i < this.columns * this.rows; i++) {
-      const form = this.rollForm();
-      this.tiles.push({ form, turn: this.random.int(0, 3), previousForm: form, progress: 1 });
+      this.tiles.push({ form: 0, turn: 0, previousForm: 0, progress: 1 });
+    }
+    for (let i = 0; i < this.tiles.length; i++) {
+      this.settle(i);
+      this.tiles[i].progress = 1;
     }
   }
   rollForm() {
     const roll = this.random.unit();
     return roll < 0.76 ? 0 : roll < 0.88 ? 1 : 2;
   }
-  change(index) {
+  // 0...1, varying smoothly over the grid and slowly over time, so the picture changes in patches.
+  field(x, y, key) {
+    const px = x / 6 + this.elapsed * 0.03, py = y / 6 + this.elapsed * 0.02;
+    const ix = Math.floor(px), iy = Math.floor(py), tx = px - ix, ty = py - iy;
+    const knot = (a, b) => new SeededRandom((this.seed + Math.imul(key, 0x9E3779B1)
+      + Math.imul(a, 0x01B3) + Math.imul(b, 0x5851F42D)) | 0).unit();
+    const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const top = knot(ix, iy) + (knot(ix + 1, iy) - knot(ix, iy)) * sx;
+    const bottom = knot(ix, iy + 1) + (knot(ix + 1, iy + 1) - knot(ix, iy + 1)) * sx;
+    return top + (bottom - top) * sy;
+  }
+  // Looks at one tile again. Depending on the order here, it joins a ring or turns to anything.
+  // Arc tiles on a checkerboard of orientations close into rings. Where the board is offset, the
+  // rings give way to a ribbon running along the seam.
+  settle(index) {
     const tile = this.tiles[index];
     if (tile.progress < 1) return;
+    const x = index % this.columns, y = Math.floor(index / this.columns);
+    let form, parity;
+    if (this.random.unit() < this.order + (this.field(x, y, 1) - 0.5) * 0.7) {
+      form = 0;
+      parity = (x + y + (this.field(x, y, 2) > 0.5 ? 1 : 0)) % 2;
+    } else {
+      form = this.rollForm();
+      parity = this.random.int(0, 1);
+    }
+    if (form === tile.form && parity === tile.turn % 2) return;
     tile.previousForm = tile.form;
-    tile.form = this.rollForm();
-    tile.turn += 1;
+    tile.form = form;
+    tile.turn += (tile.turn + 1) % 2 === parity ? 1 : 2;
     tile.progress = 0;
   }
-  // Turns a small neighborhood, because the patterns live in how neighbors connect.
-  changeCluster(count) {
+  // Looks at a small neighborhood, because the patterns live in how neighbors connect.
+  settleCluster(count) {
     const r = this.random, cx = r.int(0, this.columns - 1), cy = r.int(0, this.rows - 1);
     for (let i = 0; i < count; i++) {
       const x = cx + r.int(-2, 2), y = cy + r.int(-2, 2);
-      if (x >= 0 && x < this.columns && y >= 0 && y < this.rows) this.change(y * this.columns + x);
+      if (x >= 0 && x < this.columns && y >= 0 && y < this.rows) this.settle(y * this.columns + x);
     }
   }
   update(dt, audio) {
+    this.elapsed += dt;
     const target = 0.16 + audio.bass * 0.035;
     this.spread += (target - this.spread) * (1 - Math.exp(-dt / (target > this.spread ? 0.05 : 0.35)));
     this.recent += (audio.energy - this.recent) * (1 - Math.exp(-dt / (audio.energy > this.recent ? 0.35 : 1.2)));
@@ -495,31 +607,18 @@ class Kacheln {
       powerTarget = Math.min(1, eased(0.02, 0.2, this.recent - this.usual) * 0.9 + eased(0.3, 0.7, this.recent) * 0.6);
     }
     this.power += (powerTarget - this.power) * (1 - Math.exp(-dt / (powerTarget > this.power ? 0.25 : 0.8)));
-    this.kick *= Math.exp(-dt / 0.15);
-    this.sinceWave += dt;
+    // Order breaks quickly and comes back slowly.
+    const orderTarget = 1 - Math.min(1, this.power * 1.3);
+    this.order += (orderTarget - this.order) * (1 - Math.exp(-dt / (orderTarget < this.order ? 0.4 : 4)));
     if (audio.onsetCount !== this.lastOnset) {
       this.lastOnset = audio.onsetCount;
-      this.kick = Math.max(this.kick, audio.onset * this.power);
-      this.changeCluster(Math.floor((2 + Math.floor(audio.onset * 10)) * (1 + this.power * 2)));
-      if (this.power > 0.55 && audio.onset > 0.4 && this.sinceWave > 1.2 && this.waves.length < 2) {
-        this.sinceWave = 0;
-        this.waves.push({ x: this.random.int(0, this.columns - 1), y: this.random.int(0, this.rows - 1), radius: 0 });
-      }
+      this.settleCluster(Math.floor((2 + Math.floor(audio.onset * 10)) * (1 + this.power * 2)));
     }
-    // A ring spreading from one tile, turning each tile as it passes.
-    for (const wave of this.waves) {
-      const inner = wave.radius, outer = inner + 34 * dt;
-      wave.radius = outer;
-      for (let i = 0; i < this.tiles.length; i++) {
-        const distance = Math.hypot(i % this.columns - wave.x, Math.floor(i / this.columns) - wave.y);
-        if (distance >= inner && distance < outer) this.change(i);
-      }
-    }
-    this.waves = this.waves.filter(wave => wave.radius <= this.columns + this.rows);
-    this.sinceDrift += dt;
-    if (this.sinceDrift > (audio.state === 'music' ? 1.5 : audio.state === 'quiet' ? 2.5 : 6)) {
-      this.sinceDrift = 0;
-      this.change(this.random.int(0, this.tiles.length - 1));
+    const rate = audio.state === 'music' ? 10 + audio.energy * 25 + this.power * 40 : audio.state === 'quiet' ? 3 : 0.5;
+    this.pending += rate * dt;
+    while (this.pending >= 1) {
+      this.pending -= 1;
+      this.settle(this.random.int(0, this.tiles.length - 1));
     }
     const step = dt / (0.45 - this.power * 0.25);
     for (const tile of this.tiles) if (tile.progress < 1) tile.progress = Math.min(1, tile.progress + step);
@@ -528,21 +627,20 @@ class Kacheln {
     const x0 = this.originX, y0 = this.originY, x1 = x0 + this.columns * this.size, y1 = y0 + this.rows * this.size;
     lines.line(x0, y0, x1, y0); lines.line(x1, y0, x1, y1); lines.line(x1, y1, x0, y1); lines.line(x0, y1, x0, y0);
     const sides = Math.max(5, Math.floor(9 * lines.detail));
-    const weight = 1 + this.power * 0.7 + this.kick * 0.7;
     this.tiles.forEach((tile, index) => {
       const cx = x0 + (index % this.columns + 0.5) * this.size;
       const cy = y0 + (Math.floor(index / this.columns) + 0.5) * this.size;
       const p = tile.progress, eased = p * p * (3 - 2 * p);
       const angle = (tile.turn - (1 - eased)) * Math.PI / 2;
       if (p >= 1 || tile.form === tile.previousForm) {
-        this.draw(lines, tile.form, cx, cy, angle, 1, weight, sides);
+        this.draw(lines, tile.form, cx, cy, angle, 1, sides);
       } else {
-        this.draw(lines, tile.previousForm, cx, cy, angle, 1 - eased, weight, sides);
-        this.draw(lines, tile.form, cx, cy, angle, eased, weight, sides);
+        this.draw(lines, tile.previousForm, cx, cy, angle, 1 - eased, sides);
+        this.draw(lines, tile.form, cx, cy, angle, eased, sides);
       }
     });
   }
-  draw(lines, form, cx, cy, angle, alpha, weight, sides) {
+  draw(lines, form, cx, cy, angle, alpha, sides) {
     const half = this.size / 2, gap = this.size * this.spread;
     const cos = Math.cos(angle), sin = Math.sin(angle);
     const arc = (x, y, radius, from, count) => {
@@ -551,7 +649,7 @@ class Kacheln {
         const a = from + i / count * Math.PI / 2;
         const lx = x + radius * Math.cos(a), ly = y + radius * Math.sin(a);
         const qx = cx + lx * cos - ly * sin, qy = cy + lx * sin + ly * cos;
-        if (i > 0) lines.line(px, py, qx, qy, alpha, 0, weight);
+        if (i > 0) lines.line(px, py, qx, qy, alpha);
         px = qx; py = qy;
       }
     };
@@ -569,7 +667,7 @@ class Kacheln {
       }
     } else if (form === 1) {
       for (const x of [-gap, 0, gap]) {
-        lines.line(cx + x * cos + half * sin, cy + x * sin - half * cos, cx + x * cos - half * sin, cy + x * sin + half * cos, alpha, 0, weight);
+        lines.line(cx + x * cos + half * sin, cy + x * sin - half * cos, cx + x * cos - half * sin, cy + x * sin + half * cos, alpha);
       }
       cap(-half, 0, -Math.PI / 2);
       cap(half, 0, Math.PI / 2);
@@ -631,6 +729,33 @@ function hersheyRows(text, scale, maxWidth) {
   return rows;
 }
 
+// Text the Hershey font can't draw arrives as outlines from the iPad, which has the fonts. See OutlineText.swift.
+const OUTLINE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const OUTLINE_VALUES = Object.fromEntries([...OUTLINE_ALPHABET].map((ch, index) => [ch, index]));
+
+function decodeOutlineWord([advance, encoded]) {
+  const value = (text, i) => (OUTLINE_VALUES[text[i]] * 64 + OUTLINE_VALUES[text[i + 1]]) / 4 - 64;
+  const contours = encoded.split(' ').map(text => {
+    const contour = [];
+    for (let i = 0; i + 3 < text.length; i += 4) contour.push([value(text, i), value(text, i + 2)]);
+    return contour;
+  });
+  return { advance, contours };
+}
+
+function outlineRows(words, scale, maxWidth) {
+  const rows = [];
+  let row = [], used = 0;
+  for (const word of words) {
+    const advance = word.advance * scale;
+    if (used + advance > maxWidth && row.length) { rows.push(row); row = []; used = 0; }
+    row.push(word);
+    used += advance;
+  }
+  if (row.length) rows.push(row);
+  return rows;
+}
+
 // Lyrics written by a pen plotter on a roll of paper. Ported from Packages/Presets/Sources/Lyrik.swift.
 class Lyrik {
   constructor(seed, width, height) {
@@ -653,12 +778,23 @@ class Lyrik {
     this.blocks = []; this.scroll = 0; this.headerAge = 0;
     let y = this.margin + this.rowHeight * 0.6;
     const make = (text, scale, start, duration) => {
-      const rows = hersheyRows(text, scale, this.width - this.margin * 2);
-      if (!rows.length) return null;
-      const top = y, segments = [];
-      for (const row of rows) {
-        this.strokes(row, this.margin, y, scale, segments);
-        y += this.rowHeight * scale / this.scale;
+      const maxWidth = this.width - this.margin * 2, top = y, segments = [];
+      const outlined = data.outlined && data.outlined[text];
+      if (outlined) {
+        const words = outlined.slice(1).map(index => data.words[index]).filter(Boolean);
+        const rows = outlineRows(words, scale, maxWidth);
+        if (!rows.length) return null;
+        for (const row of rows) {
+          this.outlineStrokes(row, outlined[0] === 1, maxWidth, y, scale, segments);
+          y += this.rowHeight * scale / this.scale;
+        }
+      } else {
+        const rows = hersheyRows(text, scale, maxWidth);
+        if (!rows.length) return null;
+        for (const row of rows) {
+          this.strokes(row, this.margin, y, scale, segments);
+          y += this.rowHeight * scale / this.scale;
+        }
       }
       let total = 0;
       for (const s of segments) { s[4] = Math.hypot(s[2] - s[0], s[3] - s[1]); total += s[4]; }
@@ -674,6 +810,19 @@ class Lyrik {
       const gap = index + 1 < data.lines.length ? data.lines[index + 1][0] - time : 4;
       add(make(text, this.scale, time, Math.min(6, Math.max(0.6, gap * 0.85))));
     });
+  }
+  outlineStrokes(row, isRightToLeft, maxWidth, y, scale, out) {
+    let penX = isRightToLeft ? this.margin + maxWidth : this.margin;
+    for (const word of row) {
+      if (isRightToLeft) penX -= word.advance * scale;
+      for (const contour of word.contours) {
+        for (let i = 0; i + 1 < contour.length; i++) {
+          out.push([penX + contour[i][0] * scale, y + contour[i][1] * scale,
+                    penX + contour[i + 1][0] * scale, y + contour[i + 1][1] * scale, 0]);
+        }
+      }
+      if (!isRightToLeft) penX += word.advance * scale;
+    }
   }
   strokes(row, x, baseline, scale, out) {
     let penX = x;
@@ -736,7 +885,7 @@ class Lyrik {
 }
 
 // The Rapport logo and name, plotted at startup. Ported from Packages/Presets/Sources/RapportMark.swift.
-const MARK_DURATION = 2.6;
+const MARK_DURATION = 2.2, MARK_NAME_START = 1.5, MARK_NAME_SECONDS = 0.6;
 
 function markLogo(cx, cy, size, settle) {
   const unit = size / 2, half = 0.5, gap = 0.17, result = [];
@@ -776,12 +925,16 @@ function emitMark(lines, width, height, t) {
   };
   const plotted = clamp(t, 0, 1);
   plot(markLogo(width / 2, height * 0.42, side * 0.35, clamp((t - 0.7) / 1.1, 0, 1)), plotted * plotted * (3 - 2 * plotted));
-  const scale = side * 0.0039, row = hersheyCharacters('Rapport');
+  const scale = side * 0.0039, row = hersheyCharacters('RAPPORT');
   let textWidth = 0;
   for (const ch of row) { const g = HERSHEY[ch.code - 32]; textWidth += (g.right - g.left) * scale; }
   const segments = [];
   Lyrik.prototype.strokes.call(null, row, (width - textWidth) / 2, height * 0.76, scale, segments);
-  plot(segments.map(s => [[s[0], s[1]], [s[2], s[3]]]), clamp(t - 1.5, 0, 1));
+  const reveal = clamp((t - MARK_NAME_START) / MARK_NAME_SECONDS, 0, 1);
+  // One pen works rightwards to the center. The other retraces the rest backwards, from the last letter.
+  const isLeft = s => (s[0] + s[2]) / 2 < width / 2;
+  plot(segments.filter(isLeft).map(s => [[s[0], s[1]], [s[2], s[3]]]), reveal);
+  plot(segments.filter(s => !isLeft(s)).reverse().map(s => [[s[2], s[3]], [s[0], s[1]]]), reveal);
 }
 
 // After Zdeněk Sýkora, Lines (Linie), from 1973. Ported from Linie.swift.
